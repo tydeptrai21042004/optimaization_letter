@@ -1,0 +1,13 @@
+{
+  "train_loss": 1.14072744846344,
+  "train_acc": 0.275,
+  "val_loss": 1.18379012743632,
+  "val_acc": 0.3333333333333333,
+  "last_lr": 0.00010001052132524218,
+  "stats": {
+    "clip_rate": 0.0,
+    "delta_mean_abs_final": 0.0006290410685311949,
+    "beta_eff_mean": 3.0,
+    "raw_abs_ema_final": 0.0003773052573321158
+  }
+}
