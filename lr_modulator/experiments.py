@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import torch
 import torch.optim as optim
@@ -14,6 +14,29 @@ from .io_utils import history_path, load_json, make_label, save_history_csv, sav
 from .model_zoo import build_model
 from .runtime import set_seed
 from .schedulers import Controller
+
+
+def _uniq_keep_order(xs: Sequence[str]) -> List[str]:
+    seen = set()
+    out = []
+    for x in xs:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+def methods_for_task(config: ExperimentConfig, task: str, dataset: str) -> List[str]:
+    if task == "scratch":
+        methods = list(config.scratch_methods)
+        if dataset == "cifar10" and config.extra_baselines_cifar10:
+            methods.extend(config.extra_baselines_cifar10)
+        return _uniq_keep_order(methods)
+
+    if task == "finetune":
+        return _uniq_keep_order(list(config.finetune_methods))
+
+    raise ValueError(f"Unknown task: {task}")
 
 
 def run_one(
@@ -28,7 +51,7 @@ def run_one(
     base_lr: float,
     pretrained: bool,
 ) -> Optional[Dict]:
-    label = make_label(
+    base_label = make_label(
         dataset=dataset,
         model_name=model_name,
         method=method,
@@ -38,6 +61,14 @@ def run_one(
         use_auto_beta=config.use_auto_beta,
         pretrained=pretrained,
     )
+
+    # IMPORTANT:
+    # include task/epochs/batch_size/lr in label so different experiment settings
+    # do not overwrite each other when skip_if_exists=True
+    task_tag = "finetune" if pretrained else "scratch"
+    lr_tag = f"{base_lr:.8g}".replace(".", "p")
+    label = f"{base_label}_{task_tag}_ep{epochs}_bs{batch_size}_lr{lr_tag}"
+
     sum_path = summary_path(config.save_dir, label)
     hist_path = history_path(config.save_dir, label)
 
@@ -51,7 +82,9 @@ def run_one(
 
     set_seed(seed, config.deterministic)
     input_size = recommended_input_size(model_name, dataset, pretrained)
-    tr_loader, va_loader, te_loader, num_classes = build_loaders(config, device, dataset, input_size, batch_size, seed)
+    tr_loader, va_loader, te_loader, num_classes = build_loaders(
+        config, device, dataset, input_size, batch_size, seed
+    )
     model = build_model(model_name, num_classes, pretrained, input_size).to(device)
 
     optimizer = optim.SGD(
@@ -96,6 +129,7 @@ def run_one(
         "batch_size": batch_size,
         "base_lr": base_lr,
         "pretrained": pretrained,
+        "task": task_tag,
         **final_metrics,
         "time_sec": float(elapsed),
         "time_left_sec": float(config.time_left_sec()),
@@ -117,6 +151,66 @@ def safe_run(all_summaries: List[Dict], config: ExperimentConfig, device: torch.
             print(f"[FAIL->SKIP] {args} | reason: {repr(exc)}")
         else:
             raise
+
+
+def run_method_suite(
+    config: ExperimentConfig,
+    device: torch.device,
+    task: str,
+    dataset: str,
+    model_name: str,
+    epochs: Optional[int] = None,
+    batch_size: Optional[int] = None,
+    base_lr: Optional[float] = None,
+    seeds: Optional[Sequence[int]] = None,
+) -> List[Dict]:
+    all_summaries: List[Dict] = []
+
+    if task == "scratch":
+        pretrained = False
+        epochs = config.scratch_epochs if epochs is None else epochs
+        batch_size = config.scratch_batch if batch_size is None else batch_size
+        base_lr = config.lr_scratch if base_lr is None else base_lr
+    elif task == "finetune":
+        pretrained = True
+        epochs = config.finetune_epochs if epochs is None else epochs
+        batch_size = config.finetune_batch if batch_size is None else batch_size
+        base_lr = config.lr_finetune if base_lr is None else base_lr
+    else:
+        raise ValueError("task must be either 'scratch' or 'finetune'")
+
+    if seeds is None:
+        seeds = config.seeds
+
+    methods = methods_for_task(config, task, dataset)
+
+    print("\n" + "=" * 120)
+    print(f"Running suite | task={task} | dataset={dataset} | model={model_name}")
+    print(f"epochs={epochs} | batch_size={batch_size} | lr={base_lr} | pretrained={pretrained}")
+    print(f"methods={methods} | seeds={list(seeds)}")
+    print("=" * 120)
+
+    for method in methods:
+        for seed in seeds:
+            safe_run(
+                all_summaries,
+                config,
+                device,
+                dataset,
+                model_name,
+                method,
+                seed,
+                epochs,
+                batch_size,
+                base_lr,
+                pretrained,
+            )
+            if config.should_stop():
+                break
+        if config.should_stop():
+            break
+
+    return all_summaries
 
 
 def run_all(config: ExperimentConfig, device: torch.device) -> List[Dict]:
@@ -200,4 +294,3 @@ def run_all(config: ExperimentConfig, device: torch.device) -> List[Dict]:
                 break
 
     return all_summaries
-
