@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
-from torch.cuda.amp import autocast
 from torch.utils.data import DataLoader
 
 from .config import ExperimentConfig
@@ -17,6 +17,14 @@ def make_grad_scaler(device: torch.device, enabled: bool):
     except Exception:  # pragma: no cover - compatibility fallback
         return torch.cuda.amp.GradScaler(enabled=enabled)
 
+
+def get_autocast_context(device: torch.device, enabled: bool):
+    if not enabled:
+        return nullcontext()
+    try:
+        return torch.amp.autocast(device_type=device.type, enabled=True)
+    except Exception:  # pragma: no cover - compatibility fallback
+        return torch.cuda.amp.autocast(enabled=True)
 
 
 @torch.no_grad()
@@ -50,7 +58,7 @@ def train_one_epoch(
 ) -> Tuple[float, float]:
     model.train()
     crit = nn.CrossEntropyLoss()
-    use_amp = config.use_amp and device.type == "cuda" and scaler.is_enabled()
+    use_amp = bool(config.use_amp and device.type == "cuda" and scaler.is_enabled())
 
     loss_sum = 0.0
     correct = 0
@@ -62,7 +70,7 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         if use_amp:
-            with autocast():
+            with get_autocast_context(device, enabled=True):
                 out = model(x)
                 loss = crit(out, y)
             scaler.scale(loss).backward()

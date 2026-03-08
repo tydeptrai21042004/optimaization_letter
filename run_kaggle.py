@@ -12,7 +12,7 @@ from lr_modulator.runtime import get_device
 def print_summary_table(all_summaries):
     print("\n" + "=" * 150)
     print(
-        f"{'dataset':<12}{'model':<20}{'method':<16}{'seed':>4}"
+        f"{'dataset':<12}{'model':<20}{'method':<16}{'seed':>6}"
         f"{'task':>12}{'epochs':>8}{'val':>10}{'test':>10}{'clip':>10}{'|d|':>10}{'beta_eff':>10}{'time(s)':>10}"
     )
     print("-" * 150)
@@ -21,7 +21,7 @@ def print_summary_table(all_summaries):
         dabs = s.get("delta_mean_abs_final", None)
         beta_eff = s.get("beta_eff_mean", None)
         print(
-            f"{s['dataset']:<12}{s['model']:<20}{s['method']:<16}{s['seed']:>4}"
+            f"{s['dataset']:<12}{s['model']:<20}{s['method']:<16}{s['seed']:>6}"
             f"{s.get('task', '-'):>12}{s.get('epochs', '-'):>8}"
             f"{s['best_val_acc']:>10.4f}{s['test_acc']:>10.4f}"
             f"{('-' if clip is None else f'{clip:.4f}'):>10}"
@@ -40,7 +40,7 @@ def build_parser():
         type=str,
         choices=["full", "suite"],
         default="full",
-        help="full = run paper grid, suite = run one dataset/model/task across all methods",
+        help="full = run paper grid, suite = run one dataset/model/task across methods",
     )
 
     p.add_argument(
@@ -66,6 +66,14 @@ def build_parser():
         help="Example: --seeds 0 1 2",
     )
 
+    p.add_argument(
+        "--methods",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Example: --methods constant step cosine onecycle ours_cosine ours_onecycle",
+    )
+
     return p
 
 
@@ -78,9 +86,7 @@ def main() -> None:
 
     if args.mode == "suite":
         if args.task is None or args.dataset is None or args.model is None:
-            raise ValueError(
-                "--mode suite requires --task, --dataset, and --model"
-            )
+            raise ValueError("--mode suite requires --task, --dataset, and --model")
 
         all_summaries = run_method_suite(
             config=config,
@@ -92,6 +98,7 @@ def main() -> None:
             batch_size=args.batch_size,
             base_lr=args.lr,
             seeds=args.seeds,
+            methods=args.methods,
         )
     else:
         all_summaries = run_all(config, device)

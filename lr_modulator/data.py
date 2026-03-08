@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import random
 from typing import Tuple
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset, random_split
 
@@ -63,10 +65,37 @@ def svhn_target_transform(y: int) -> int:
     return int(y) % 10
 
 
+def seed_worker(worker_id: int) -> None:
+    worker_seed = torch.initial_seed() % (2**32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def make_loader_generator(seed: int) -> torch.Generator:
+    g = torch.Generator()
+    g.manual_seed(seed)
+    return g
+
+
 def recommended_input_size(model_name: str, dataset_name: str, pretrained: bool) -> int:
     is_small = DATASET_INFO[dataset_name]["is_small"]
-    if model_name in {"resnet18", "resnet34", "resnet50"} and is_small and not pretrained:
+    model_name = model_name.lower()
+
+    if not is_small:
+        return 224
+
+    if pretrained:
+        return 224
+
+    if model_name in {"resnet18", "resnet34", "resnet50"}:
         return 32
+
+    if model_name in {"mobilenet_v3_small", "efficientnet_b0"}:
+        return 96
+
+    if model_name == "vit_b_16":
+        return 224
+
     return 224
 
 
@@ -216,15 +245,21 @@ def build_loaders(
         seed=seed,
         download=config.download,
     )
+
     kwargs = dict(
         batch_size=batch_size,
         num_workers=config.num_workers,
         pin_memory=(device.type == "cuda"),
         persistent_workers=(config.num_workers > 0),
+        worker_init_fn=seed_worker,
     )
+
+    train_gen = make_loader_generator(seed)
+    eval_gen = make_loader_generator(seed + 1)
+
     return (
-        DataLoader(tr_ds, shuffle=True, **kwargs),
-        DataLoader(va_ds, shuffle=False, **kwargs),
-        DataLoader(te_ds, shuffle=False, **kwargs),
+        DataLoader(tr_ds, shuffle=True, generator=train_gen, **kwargs),
+        DataLoader(va_ds, shuffle=False, generator=eval_gen, **kwargs),
+        DataLoader(te_ds, shuffle=False, generator=eval_gen, **kwargs),
         DATASET_INFO[dataset]["num_classes"],
     )

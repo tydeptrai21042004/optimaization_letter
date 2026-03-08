@@ -19,7 +19,7 @@ class ExperimentConfig:
     data_root: str = field(init=False)
     save_dir: str = field(init=False)
 
-    # Time budget / resume
+    # Time budget / skip behavior
     global_walltime_hours: float = 11.3
     stop_grace_minutes: int = 10
     start_time: float = field(default_factory=time.time)
@@ -45,7 +45,9 @@ class ExperimentConfig:
     do_finetune: bool = True
     finetune_datasets: List[str] = field(default_factory=lambda: ["oxfordiiitpet"])
     finetune_models: List[str] = field(default_factory=lambda: ["resnet50"])
-    finetune_methods: List[str] = field(default_factory=lambda: ["cosine", "ours_cosine"])
+    finetune_methods: List[str] = field(
+        default_factory=lambda: ["constant", "step", "cosine", "onecycle", "ours_cosine", "ours_onecycle"]
+    )
 
     # Optimization
     scratch_epochs: int = 40

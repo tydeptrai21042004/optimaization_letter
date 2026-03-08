@@ -32,6 +32,10 @@ def history_path(save_dir: str, label: str) -> str:
     return os.path.join(save_dir, f"{label}_history.csv")
 
 
+def checkpoint_path(save_dir: str, label: str, kind: str = "latest") -> str:
+    return os.path.join(save_dir, f"{label}_{kind}.pt")
+
+
 def save_json(path: str, payload: Dict) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)

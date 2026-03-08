@@ -128,3 +128,9 @@ You also get:
 - This means the smoke test can still run even if torchvision is broken locally.
 - If pretrained weights are unavailable, the project will skip failing runs when `skip_on_fail=True`.
 
+## Suggested paper-ready next steps
+
+- Change `seeds` from `[0]` to `[0, 1, 2]`
+- Save plots from the history CSV files
+- Add an ablation on `gamma`, `alpha`, and auto-beta vs fixed-beta
+- Report mean ± std over seeds
