@@ -10,6 +10,14 @@ from torch.utils.data import DataLoader, Subset, random_split
 from .config import ExperimentConfig
 
 
+GRAYSCALE_DATASETS = {
+    "mnist",
+    "emnist_digits",
+    "usps",
+    "kmnist",
+    "fashionmnist",
+}
+
 DATASET_INFO = {
     "cifar10": {
         "num_classes": 10,
@@ -29,6 +37,39 @@ DATASET_INFO = {
         "mean": (0.4377, 0.4438, 0.4728),
         "std": (0.1980, 0.2010, 0.1970),
     },
+
+    # Added grayscale datasets
+    "mnist": {
+        "num_classes": 10,
+        "is_small": True,
+        "mean": (0.5, 0.5, 0.5),
+        "std": (0.5, 0.5, 0.5),
+    },
+    "emnist_digits": {
+        "num_classes": 10,
+        "is_small": True,
+        "mean": (0.5, 0.5, 0.5),
+        "std": (0.5, 0.5, 0.5),
+    },
+    "usps": {
+        "num_classes": 10,
+        "is_small": True,
+        "mean": (0.5, 0.5, 0.5),
+        "std": (0.5, 0.5, 0.5),
+    },
+    "kmnist": {
+        "num_classes": 10,
+        "is_small": True,
+        "mean": (0.5, 0.5, 0.5),
+        "std": (0.5, 0.5, 0.5),
+    },
+    "fashionmnist": {
+        "num_classes": 10,
+        "is_small": True,
+        "mean": (0.5, 0.5, 0.5),
+        "std": (0.5, 0.5, 0.5),
+    },
+
     "flowers102": {
         "num_classes": 102,
         "is_small": False,
@@ -87,13 +128,44 @@ def recommended_input_size(model_name: str, dataset_name: str, pretrained: bool)
     if pretrained:
         return 224
 
-    if model_name in {"resnet18", "resnet34", "resnet50"}:
+    # Small-image friendly CNNs
+    if model_name in {
+        "resnet18",
+        "resnet34",
+        "resnet50",
+        "resnext50_32x4d",
+        "wide_resnet50_2",
+        "densenet121",
+        "googlenet",
+        "shufflenet_v2_x1_0",
+        "shufflenet_v2_x0_5",
+        "regnet_y_400mf",
+        "regnet_x_400mf",
+    }:
         return 32
 
-    if model_name in {"mobilenet_v3_small", "efficientnet_b0"}:
+    # Usually okay with a bit larger small-image size
+    if model_name in {
+        "mobilenet_v2",
+        "mobilenet_v3_small",
+        "mobilenet_v3_large",
+        "mnasnet0_5",
+        "mnasnet1_0",
+        "efficientnet_b0",
+        "efficientnet_v2_s",
+    }:
         return 96
 
-    if model_name == "vit_b_16":
+    # Transformer / larger modern backbones
+    if model_name in {
+        "vit_b_16",
+        "swin_t",
+        "convnext_tiny",
+        "convnext_small",
+        "alexnet",
+        "vgg11",
+        "vgg16",
+    }:
         return 224
 
     return 224
@@ -103,6 +175,27 @@ def build_transforms(dataset: str, input_size: int):
     _, transforms = _import_torchvision()
     mean = DATASET_INFO[dataset]["mean"]
     std = DATASET_INFO[dataset]["std"]
+
+    # Special handling for grayscale datasets:
+    # convert to 3 channels so RGB backbones can be reused unchanged
+    if dataset in GRAYSCALE_DATASETS:
+        train_tf = transforms.Compose(
+            [
+                transforms.Resize((input_size, input_size)),
+                transforms.Grayscale(num_output_channels=3),
+                transforms.ToTensor(),
+                transforms.Normalize(mean, std),
+            ]
+        )
+        eval_tf = transforms.Compose(
+            [
+                transforms.Resize((input_size, input_size)),
+                transforms.Grayscale(num_output_channels=3),
+                transforms.ToTensor(),
+                transforms.Normalize(mean, std),
+            ]
+        )
+        return train_tf, eval_tf
 
     if input_size == 32:
         aug = [transforms.RandomCrop(32, padding=4)]
@@ -185,6 +278,59 @@ def build_datasets(
             target_transform=svhn_target_transform,
             download=download,
         )
+        tr_idx, va_idx = make_split_indices(len(full_tr), val_ratio, seed)
+        return Subset(full_tr, tr_idx), Subset(full_ev, va_idx), te
+
+    if dataset == "mnist":
+        full_tr = datasets.MNIST(root=root, train=True, transform=train_tf, download=download)
+        full_ev = datasets.MNIST(root=root, train=True, transform=eval_tf, download=download)
+        te = datasets.MNIST(root=root, train=False, transform=eval_tf, download=download)
+        tr_idx, va_idx = make_split_indices(len(full_tr), val_ratio, seed)
+        return Subset(full_tr, tr_idx), Subset(full_ev, va_idx), te
+
+    if dataset == "emnist_digits":
+        full_tr = datasets.EMNIST(
+            root=root,
+            split="digits",
+            train=True,
+            transform=train_tf,
+            download=download,
+        )
+        full_ev = datasets.EMNIST(
+            root=root,
+            split="digits",
+            train=True,
+            transform=eval_tf,
+            download=download,
+        )
+        te = datasets.EMNIST(
+            root=root,
+            split="digits",
+            train=False,
+            transform=eval_tf,
+            download=download,
+        )
+        tr_idx, va_idx = make_split_indices(len(full_tr), val_ratio, seed)
+        return Subset(full_tr, tr_idx), Subset(full_ev, va_idx), te
+
+    if dataset == "usps":
+        full_tr = datasets.USPS(root=root, train=True, transform=train_tf, download=download)
+        full_ev = datasets.USPS(root=root, train=True, transform=eval_tf, download=download)
+        te = datasets.USPS(root=root, train=False, transform=eval_tf, download=download)
+        tr_idx, va_idx = make_split_indices(len(full_tr), val_ratio, seed)
+        return Subset(full_tr, tr_idx), Subset(full_ev, va_idx), te
+
+    if dataset == "kmnist":
+        full_tr = datasets.KMNIST(root=root, train=True, transform=train_tf, download=download)
+        full_ev = datasets.KMNIST(root=root, train=True, transform=eval_tf, download=download)
+        te = datasets.KMNIST(root=root, train=False, transform=eval_tf, download=download)
+        tr_idx, va_idx = make_split_indices(len(full_tr), val_ratio, seed)
+        return Subset(full_tr, tr_idx), Subset(full_ev, va_idx), te
+
+    if dataset == "fashionmnist":
+        full_tr = datasets.FashionMNIST(root=root, train=True, transform=train_tf, download=download)
+        full_ev = datasets.FashionMNIST(root=root, train=True, transform=eval_tf, download=download)
+        te = datasets.FashionMNIST(root=root, train=False, transform=eval_tf, download=download)
         tr_idx, va_idx = make_split_indices(len(full_tr), val_ratio, seed)
         return Subset(full_tr, tr_idx), Subset(full_ev, va_idx), te
 

@@ -1,6 +1,6 @@
 # EMA-Loss LR Modulator Project
 
-This is a modularized version of your Kaggle notebook.
+This is a modularized version of our Kaggle notebook.
 
 ## What is included
 
@@ -73,7 +73,7 @@ This does **not** depend on torchvision datasets, downloads, or Kaggle internet.
 
 ## Important bug fixed from the notebook
 
-Your original notebook had this bug in the extra-baselines block:
+our original notebook had this bug in the extra-baselines block:
 
 ```python
 safe_run("cifar10", SCRATCH_MODEL, method, seed, ...)
@@ -113,12 +113,12 @@ Outputs are written under:
 
 ## Output files
 
-For each run label you get:
+For each run label we get:
 
 - `*_summary.json` — final metrics
 - `*_history.csv` — per-epoch metrics
 
-You also get:
+we also get:
 
 - `all_run_summaries.csv`
 
@@ -127,5 +127,4 @@ You also get:
 - `torchvision` is imported lazily inside dataset/model functions.
 - This means the smoke test can still run even if torchvision is broken locally.
 - If pretrained weights are unavailable, the project will skip failing runs when `skip_on_fail=True`.
-
 
