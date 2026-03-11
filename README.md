@@ -71,17 +71,6 @@ Entry point for the full Kaggle experiment.
 Fast CPU smoke test using synthetic data and a tiny CNN.
 This does **not** depend on torchvision datasets, downloads, or Kaggle internet.
 
-## Important bug fixed from the notebook
-
-our original notebook had this bug in the extra-baselines block:
-
-```python
-safe_run("cifar10", SCRATCH_MODEL, method, seed, ...)
-```
-
-`SCRATCH_MODEL` was undefined.
-
-This project fixes it by looping over `config.scratch_models`.
 
 ## How to run
 
