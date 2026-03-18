@@ -6,30 +6,39 @@ import os
 from lr_modulator.config import ExperimentConfig
 from lr_modulator.experiments import run_all, run_method_suite
 from lr_modulator.io_utils import save_aggregate_csv
-from lr_modulator.runtime import get_device
+from lr_modulator.runtime import get_device, validate_methods
 
 
 def print_summary_table(all_summaries):
-    print("\n" + "=" * 150)
+    print("\n" + "=" * 170)
     print(
-        f"{'dataset':<12}{'model':<20}{'method':<16}{'seed':>6}"
-        f"{'task':>12}{'epochs':>8}{'val':>10}{'test':>10}{'clip':>10}{'|d|':>10}{'beta_eff':>10}{'time(s)':>10}"
+        f"{'dataset':<14}{'model':<20}{'method':<22}{'seed':>6}"
+        f"{'task':>12}{'epochs':>8}{'val':>10}{'test':>10}"
+        f"{'clip':>10}{'|d|':>10}{'beta_eff':>10}{'time(s)':>10}"
     )
-    print("-" * 150)
+    print("-" * 170)
+
     for s in all_summaries:
         clip = s.get("clip_rate", None)
         dabs = s.get("delta_mean_abs_final", None)
         beta_eff = s.get("beta_eff_mean", None)
+
         print(
-            f"{s['dataset']:<12}{s['model']:<20}{s['method']:<16}{s['seed']:>6}"
-            f"{s.get('task', '-'):>12}{s.get('epochs', '-'):>8}"
-            f"{s['best_val_acc']:>10.4f}{s['test_acc']:>10.4f}"
+            f"{s['dataset']:<14}"
+            f"{s['model']:<20}"
+            f"{s['method']:<22}"
+            f"{s['seed']:>6}"
+            f"{s.get('task', '-'):>12}"
+            f"{s.get('epochs', '-'):>8}"
+            f"{s['best_val_acc']:>10.4f}"
+            f"{s['test_acc']:>10.4f}"
             f"{('-' if clip is None else f'{clip:.4f}'):>10}"
             f"{('-' if dabs is None else f'{dabs:.4f}'):>10}"
             f"{('-' if beta_eff is None else f'{beta_eff:.3f}'):>10}"
             f"{s['time_sec']:>10.1f}"
         )
-    print("=" * 150)
+
+    print("=" * 170)
 
 
 def build_parser():
@@ -71,7 +80,10 @@ def build_parser():
         type=str,
         nargs="+",
         default=None,
-        help="Example: --methods constant step cosine onecycle ours_cosine ours_onecycle",
+        help=(
+            "Example: --methods constant step cosine onecycle warmup_cosine "
+            "warm_restarts plateau ours_cosine ours_onecycle ours_warmup_cosine"
+        ),
     )
 
     return p
@@ -83,6 +95,9 @@ def main() -> None:
 
     config = ExperimentConfig()
     device, _ = get_device()
+
+    if args.methods is not None:
+        args.methods = validate_methods(args.methods)
 
     if args.mode == "suite":
         if args.task is None or args.dataset is None or args.model is None:
@@ -101,6 +116,8 @@ def main() -> None:
             methods=args.methods,
         )
     else:
+        if args.methods is not None:
+            print("[INFO] --methods is ignored in --mode full; using config-defined grids.")
         all_summaries = run_all(config, device)
 
     csv_path = os.path.join(config.save_dir, "all_run_summaries.csv")
