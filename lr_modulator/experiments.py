@@ -11,7 +11,14 @@ import torch.optim as optim
 from .config import ExperimentConfig
 from .data import build_loaders, recommended_input_size
 from .engine import fit
-from .io_utils import history_path, load_json, make_label, save_history_csv, save_json, summary_path
+from .io_utils import (
+    history_path,
+    load_json,
+    make_label,
+    save_history_csv,
+    save_json,
+    summary_path,
+)
 from .model_zoo import build_model
 from .runtime import set_seed
 from .schedulers import Controller
@@ -41,7 +48,8 @@ def _print_run_header(
     print(
         "\n[RUN] "
         f"task={task} | dataset={dataset} | model={model_name} | method={method} | "
-        f"seed={seed} | epochs={epochs} | batch_size={batch_size} | lr={base_lr} | pretrained={pretrained}"
+        f"seed={seed} | epochs={epochs} | batch_size={batch_size} | "
+        f"lr={base_lr} | pretrained={pretrained}"
     )
 
 
@@ -114,7 +122,12 @@ def run_one(
 
     input_size = recommended_input_size(model_name, dataset, pretrained)
     tr_loader, va_loader, te_loader, num_classes = build_loaders(
-        config, device, dataset, input_size, batch_size, seed
+        config=config,
+        device=device,
+        dataset=dataset,
+        input_size=input_size,
+        batch_size=batch_size,
+        seed=seed,
     )
 
     model = build_model(model_name, num_classes, pretrained, input_size).to(device)
@@ -172,7 +185,17 @@ def run_one(
         "gamma": config.gamma,
         "m_win": config.m_win,
         "rho": config.rho,
-        "warmup_steps": config.warmup_steps,
+        "mod_warmup_steps": config.mod_warmup_steps,
+        "sched_warmup_steps": config.sched_warmup_steps,
+        "warmup_start_factor": config.warmup_start_factor,
+        "restart_t0_steps": config.restart_t0_steps,
+        "restart_t_mult": config.restart_t_mult,
+        "plateau_mode": config.plateau_mode,
+        "plateau_factor": config.plateau_factor,
+        "plateau_patience": config.plateau_patience,
+        "plateau_threshold": config.plateau_threshold,
+        "plateau_threshold_mode": config.plateau_threshold_mode,
+        "plateau_cooldown": config.plateau_cooldown,
         "use_auto_beta": config.use_auto_beta,
         "beta_fixed": config.beta_fixed,
         "target_mean_abs_delta": config.target_mean_abs_delta,
@@ -188,7 +211,12 @@ def run_one(
     return summary
 
 
-def safe_run(all_summaries: List[Dict], config: ExperimentConfig, device: torch.device, *args) -> None:
+def safe_run(
+    all_summaries: List[Dict],
+    config: ExperimentConfig,
+    device: torch.device,
+    *args,
+) -> None:
     try:
         summary = run_one(config, device, *args)
         if summary is not None:
@@ -285,7 +313,8 @@ def run_all(config: ExperimentConfig, device: torch.device) -> List[Dict]:
 
     for ds in config.scratch_datasets:
         for model_name in config.scratch_models:
-            for method in config.scratch_methods:
+            methods = methods_for_task(config, "scratch", ds)
+            for method in methods:
                 for seed in config.seeds:
                     _print_run_header(
                         task="scratch",
@@ -320,45 +349,11 @@ def run_all(config: ExperimentConfig, device: torch.device) -> List[Dict]:
         if config.should_stop():
             break
 
-    if config.extra_baselines_cifar10 and not config.should_stop():
-        for model_name in config.scratch_models:
-            for method in config.extra_baselines_cifar10:
-                for seed in config.seeds:
-                    _print_run_header(
-                        task="scratch",
-                        dataset="cifar10",
-                        model_name=model_name,
-                        method=method,
-                        seed=seed,
-                        epochs=config.scratch_epochs,
-                        batch_size=config.scratch_batch,
-                        base_lr=config.lr_scratch,
-                        pretrained=False,
-                    )
-                    safe_run(
-                        all_summaries,
-                        config,
-                        device,
-                        "cifar10",
-                        model_name,
-                        method,
-                        seed,
-                        config.scratch_epochs,
-                        config.scratch_batch,
-                        config.lr_scratch,
-                        False,
-                    )
-                    if config.should_stop():
-                        break
-                if config.should_stop():
-                    break
-            if config.should_stop():
-                break
-
     if config.do_finetune and not config.should_stop():
         for ds in config.finetune_datasets:
             for model_name in config.finetune_models:
-                for method in config.finetune_methods:
+                methods = methods_for_task(config, "finetune", ds)
+                for method in methods:
                     for seed in config.seeds:
                         _print_run_header(
                             task="finetune",
