@@ -28,7 +28,11 @@ def get_autocast_context(device: torch.device, enabled: bool):
 
 
 @torch.no_grad()
-def eval_metrics(model: nn.Module, loader: DataLoader, device: torch.device) -> Tuple[float, float]:
+def eval_metrics(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+) -> Tuple[float, float]:
     model.eval()
     crit = nn.CrossEntropyLoss()
     loss_sum = 0.0
@@ -38,8 +42,10 @@ def eval_metrics(model: nn.Module, loader: DataLoader, device: torch.device) -> 
     for x, y in loader:
         x = x.to(device, non_blocking=(device.type == "cuda"))
         y = y.to(device, non_blocking=(device.type == "cuda"))
+
         out = model(x)
         loss = crit(out, y)
+
         loss_sum += loss.item() * x.size(0)
         correct += (out.argmax(1) == y).sum().item()
         total += x.size(0)
@@ -67,12 +73,14 @@ def train_one_epoch(
     for x, y in loader:
         x = x.to(device, non_blocking=(device.type == "cuda"))
         y = y.to(device, non_blocking=(device.type == "cuda"))
+
         optimizer.zero_grad(set_to_none=True)
 
         if use_amp:
             with get_autocast_context(device, enabled=True):
                 out = model(x)
                 loss = crit(out, y)
+
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -82,6 +90,7 @@ def train_one_epoch(
             loss.backward()
             optimizer.step()
 
+        # Batch-level controller update
         controller.on_batch_end(loss.item())
 
         loss_sum += loss.item() * x.size(0)
@@ -105,7 +114,11 @@ def fit(
     config: ExperimentConfig,
     epochs: int,
 ) -> Tuple[Dict[str, float], List[Dict[str, float]]]:
-    scaler = make_grad_scaler(device, enabled=(config.use_amp and device.type == "cuda"))
+    scaler = make_grad_scaler(
+        device,
+        enabled=(config.use_amp and device.type == "cuda"),
+    )
+
     best_val = -1.0
     best_state = None
     history: List[Dict[str, float]] = []
@@ -115,8 +128,21 @@ def fit(
             print("[STOP] Time budget reached mid-run (saving best so far).")
             break
 
-        tr_loss, tr_acc = train_one_epoch(model, train_loader, optimizer, controller, scaler, device, config)
+        tr_loss, tr_acc = train_one_epoch(
+            model=model,
+            loader=train_loader,
+            optimizer=optimizer,
+            controller=controller,
+            scaler=scaler,
+            device=device,
+            config=config,
+        )
+
         va_loss, va_acc = eval_metrics(model, val_loader, device)
+
+        # Epoch-level controller update
+        # Important for methods like "plateau" that depend on a validation metric.
+        controller.on_epoch_end(va_loss)
 
         row = {
             "epoch": epoch + 1,
@@ -132,20 +158,31 @@ def fit(
 
         if va_acc > best_val:
             best_val = va_acc
-            best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+            best_state = {
+                k: v.detach().cpu()
+                for k, v in model.state_dict().items()
+            }
 
         print(
             f"[epoch {epoch + 1:03d}/{epochs:03d}] "
-            f"tr_acc={tr_acc:.4f} va_acc={va_acc:.4f} lr={controller.last_lr:.6f}"
+            f"tr_acc={tr_acc:.4f} "
+            f"va_acc={va_acc:.4f} "
+            f"va_loss={va_loss:.4f} "
+            f"lr={controller.last_lr:.6f}"
         )
 
     if best_state is not None:
         model.load_state_dict(best_state)
 
     te_loss, te_acc = eval_metrics(model, test_loader, device)
+
     final_metrics = {
         "best_val_acc": float(best_val),
         "test_acc": float(te_acc),
         "test_loss": float(te_loss),
     }
+
+    # Include modulator stats if available
+    final_metrics.update(controller.stats())
+
     return final_metrics, history
