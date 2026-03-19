@@ -24,6 +24,15 @@ from .runtime import set_seed
 from .schedulers import Controller
 
 
+def _cfg_get(config: ExperimentConfig, *names: str, default=None):
+    for name in names:
+        if hasattr(config, name):
+            value = getattr(config, name)
+            if value is not None:
+                return value
+    return default
+
+
 def _uniq_keep_order(xs: Sequence[str]) -> List[str]:
     seen = set()
     out = []
@@ -185,17 +194,17 @@ def run_one(
         "gamma": config.gamma,
         "m_win": config.m_win,
         "rho": config.rho,
-        "mod_warmup_steps": config.mod_warmup_steps,
-        "sched_warmup_steps": config.sched_warmup_steps,
-        "warmup_start_factor": config.warmup_start_factor,
-        "restart_t0_steps": config.restart_t0_steps,
-        "restart_t_mult": config.restart_t_mult,
-        "plateau_mode": config.plateau_mode,
-        "plateau_factor": config.plateau_factor,
-        "plateau_patience": config.plateau_patience,
-        "plateau_threshold": config.plateau_threshold,
-        "plateau_threshold_mode": config.plateau_threshold_mode,
-        "plateau_cooldown": config.plateau_cooldown,
+        "mod_warmup_steps": _cfg_get(config, "mod_warmup_steps", "warmup_steps", default=0),
+        "sched_warmup_steps": _cfg_get(config, "sched_warmup_steps", "warmup_steps", default=0),
+        "warmup_start_factor": _cfg_get(config, "warmup_start_factor", default=0.1),
+        "restart_t0_steps": _cfg_get(config, "restart_t0_steps", "restart_t0", default=10),
+        "restart_t_mult": _cfg_get(config, "restart_t_mult", "t_mult", default=1),
+        "plateau_mode": _cfg_get(config, "plateau_mode", default="min"),
+        "plateau_factor": _cfg_get(config, "plateau_factor", default=0.5),
+        "plateau_patience": _cfg_get(config, "plateau_patience", default=2),
+        "plateau_threshold": _cfg_get(config, "plateau_threshold", default=1e-4),
+        "plateau_threshold_mode": _cfg_get(config, "plateau_threshold_mode", default="rel"),
+        "plateau_cooldown": _cfg_get(config, "plateau_cooldown", default=0),
         "use_auto_beta": config.use_auto_beta,
         "beta_fixed": config.beta_fixed,
         "target_mean_abs_delta": config.target_mean_abs_delta,
