@@ -61,7 +61,8 @@ def train_one_epoch(
     scaler,
     device: torch.device,
     config: ExperimentConfig,
-) -> Tuple[float, float]:
+    epoch_index: int = 0,
+) -> Tuple[float, float, List[Dict[str, float]]]:
     model.train()
     crit = nn.CrossEntropyLoss()
     use_amp = bool(config.use_amp and device.type == "cuda" and scaler.is_enabled())
@@ -69,11 +70,13 @@ def train_one_epoch(
     loss_sum = 0.0
     correct = 0
     total = 0
+    batch_history: List[Dict[str, float]] = []
 
-    for x, y in loader:
+    for batch_idx, (x, y) in enumerate(loader):
         x = x.to(device, non_blocking=(device.type == "cuda"))
         y = y.to(device, non_blocking=(device.type == "cuda"))
 
+        lr_used = float(optimizer.param_groups[0]["lr"])
         optimizer.zero_grad(set_to_none=True)
 
         if use_amp:
@@ -82,25 +85,48 @@ def train_one_epoch(
                 loss = crit(out, y)
 
             scaler.scale(loss).backward()
+            # Unscale before L4 / HyperSGD so their gradient norms/dots use true gradients.
+            scaler.unscale_(optimizer)
+            controller.on_after_backward(loss.item())
+            lr_after_backward = float(optimizer.param_groups[0]["lr"])
             scaler.step(optimizer)
             scaler.update()
         else:
             out = model(x)
             loss = crit(out, y)
             loss.backward()
+            controller.on_after_backward(loss.item())
+            lr_after_backward = float(optimizer.param_groups[0]["lr"])
             optimizer.step()
 
-        # Batch-level controller update
+        # Batch-level controller update.  For the proposed method, this computes
+        # delta_t from L_t and sets the LR to eta_{t+1}=r_{t+1}(1+delta_t).
         controller.on_batch_end(loss.item())
+        lr_next = float(optimizer.param_groups[0]["lr"])
 
         loss_sum += loss.item() * x.size(0)
         correct += (out.argmax(1) == y).sum().item()
         total += x.size(0)
 
+        batch_history.append(
+            {
+                "epoch": float(epoch_index + 1),
+                "batch": float(batch_idx),
+                "global_batch_in_epoch": float(batch_idx),
+                "train_loss": float(loss.item()),
+                "train_acc_batch": float((out.argmax(1) == y).float().mean().item()),
+                "lr_used": lr_used,
+                "lr_after_backward": lr_after_backward,
+                "lr_next": lr_next,
+                "delta": float(controller.last_delta),
+                "raw": float(controller.last_raw),
+            }
+        )
+
         if config.should_stop():
             break
 
-    return loss_sum / max(total, 1), correct / max(total, 1)
+    return loss_sum / max(total, 1), correct / max(total, 1), batch_history
 
 
 def fit(
@@ -113,7 +139,7 @@ def fit(
     device: torch.device,
     config: ExperimentConfig,
     epochs: int,
-) -> Tuple[Dict[str, float], List[Dict[str, float]]]:
+) -> Tuple[Dict[str, float], List[Dict[str, float]], List[Dict[str, float]]]:
     scaler = make_grad_scaler(
         device,
         enabled=(config.use_amp and device.type == "cuda"),
@@ -122,13 +148,14 @@ def fit(
     best_val = -1.0
     best_state = None
     history: List[Dict[str, float]] = []
+    batch_history_all: List[Dict[str, float]] = []
 
     for epoch in range(epochs):
         if config.should_stop():
             print("[STOP] Time budget reached mid-run (saving best so far).")
             break
 
-        tr_loss, tr_acc = train_one_epoch(
+        tr_loss, tr_acc, batch_history = train_one_epoch(
             model=model,
             loader=train_loader,
             optimizer=optimizer,
@@ -136,12 +163,13 @@ def fit(
             scaler=scaler,
             device=device,
             config=config,
+            epoch_index=epoch,
         )
+        batch_history_all.extend(batch_history)
 
         va_loss, va_acc = eval_metrics(model, val_loader, device)
 
-        # Epoch-level controller update
-        # Important for methods like "plateau" that depend on a validation metric.
+        # Epoch-level controller update.  Important for ReduceLROnPlateau.
         controller.on_epoch_end(va_loss)
 
         row = {
@@ -158,10 +186,7 @@ def fit(
 
         if va_acc > best_val:
             best_val = va_acc
-            best_state = {
-                k: v.detach().cpu()
-                for k, v in model.state_dict().items()
-            }
+            best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
 
         print(
             f"[epoch {epoch + 1:03d}/{epochs:03d}] "
@@ -182,7 +207,6 @@ def fit(
         "test_loss": float(te_loss),
     }
 
-    # Include modulator stats if available
     final_metrics.update(controller.stats())
 
-    return final_metrics, history
+    return final_metrics, history, batch_history_all

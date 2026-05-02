@@ -1,3 +1,10 @@
 torch
 torchvision
 numpy
+pandas
+scipy
+matplotlib
+tqdm
+# Optional official optimizer baselines for paper-grade comparisons:
+# dadaptation
+# prodigyopt

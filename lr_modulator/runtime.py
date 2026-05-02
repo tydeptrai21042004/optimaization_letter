@@ -16,9 +16,21 @@ SUPPORTED_METHODS = {
     "warmup_cosine",
     "warm_restarts",
     "plateau",
+    "random_cosine",
+    "random_onecycle",
+    "random_warmup_cosine",
+    "l4_sgd",
+    "hyper_sgd",
+    "dadapt_sgd",
+    "prodigy",
+    "adamw",
     "ours_cosine",
     "ours_onecycle",
     "ours_warmup_cosine",
+    "ours_no_ema_cosine",
+    "ours_no_kernel_cosine",
+    "ours_no_clip_cosine",
+    "ours_deadzone_cosine",
 }
 
 

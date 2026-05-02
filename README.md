@@ -1,119 +1,162 @@
-# EMA-Loss LR Modulator Project
+# EMA-Loss LR Modulator Benchmark
 
-This is a modularized version of our Kaggle notebook.
+This repository benchmarks a bounded causal EMA-loss learning-rate modulator against standard schedules and stronger reviewer-requested rivals.
 
-## What is included
+## What is new in this version
 
-- Multiple files instead of one giant notebook cell
-- Support for multiple datasets and multiple torchvision models
-- Baselines: `constant`, `step`, `cosine`, `onecycle`
-- Proposed methods: `ours_cosine`, `ours_onecycle`
-- Resume-safe JSON summaries
-- Per-run epoch history CSV files
-- Aggregated CSV export
-- Smoke test that runs without torchvision datasets or internet
+The code now includes:
 
-## Project structure
+- **Random bounded modulation**: `random_cosine`, `random_onecycle`, `random_warmup_cosine`
+- **Loss-based rival**: `l4_sgd`
+- **Hypergradient rival**: `hyper_sgd`
+- **Modern automatic-LR rivals**: `dadapt_sgd`, `prodigy`
+- **Proposed improved method**: bias-corrected EMA, relative trend, optional dead zone, optional variance normalization
+- **Ablations**: `ours_no_ema_cosine`, `ours_no_kernel_cosine`, `ours_no_clip_cosine`, `ours_deadzone_cosine`
+- **Batch-level logging**: LR used, next LR, raw trend, and modulation `delta`
+- **Aggregate statistics**: mean, standard deviation, 95% CI, and paired tests when multiple seeds are available
 
-```text
-lr_modulator_project/
-├── README.md
-├── requirements.txt
-├── run_kaggle.py
-├── smoke_test.py
-├── lr_modulator/
-│   ├── __init__.py
-│   ├── config.py
-│   ├── runtime.py
-│   ├── data.py
-│   ├── model_zoo.py
-│   ├── schedulers.py
-│   ├── engine.py
-│   ├── io_utils.py
-│   └── experiments.py
-└── tests/
-    └── test_scheduler_smoke.py
-```
+> For publication-grade D-Adaptation and Prodigy comparisons, install the official optional packages if available: `dadaptation` and `prodigyopt`. If they are missing, the code uses stable internal fallbacks and records `optimizer_impl="internal_fallback"` in the summary JSON/CSV.
 
-## Main split
-
-### `lr_modulator/config.py`
-Central experiment configuration.
-
-### `lr_modulator/data.py`
-Dataset metadata, transforms, split logic, and dataloaders.
-
-### `lr_modulator/model_zoo.py`
-Model builders for:
-- `resnet18`
-- `resnet34`
-- `resnet50`
-- `mobilenet_v3_small`
-- `efficientnet_b0`
-- `vit_b_16`
-
-### `lr_modulator/schedulers.py`
-Contains:
-- `BatchBaseSchedule`
-- `EMALossModulator`
-- `Controller`
-
-### `lr_modulator/engine.py`
-Training and evaluation loop.
-
-### `lr_modulator/experiments.py`
-One-run execution, resume logic, safe-run wrapper, and full grid runner.
-
-### `run_kaggle.py`
-Entry point for the full Kaggle experiment.
-
-### `smoke_test.py`
-Fast CPU smoke test using synthetic data and a tiny CNN.
-This does **not** depend on torchvision datasets, downloads, or Kaggle internet.
-
-
-## How to run
-
-### 1. Install deps
+## Install
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-### 2. Run the smoke test
+Optional official optimizers:
+
+```bash
+python -m pip install dadaptation prodigyopt
+```
+
+## Quick smoke test
 
 ```bash
 python smoke_test.py
 ```
 
-Expected result:
-- prints `Smoke test passed.`
-- writes `smoke_test_output.json`
-
-### 3. Run the full Kaggle experiment
+or with pytest:
 
 ```bash
-python run_kaggle.py
+python -m pytest tests
 ```
 
-Outputs are written under:
-- `./results_lr_modulator` locally, or
-- `/kaggle/working/results_lr_modulator` on Kaggle
+## Run one suite
+
+Example: CIFAR-10 / ResNet-18 from scratch with the key rivals:
+
+```bash
+python run_kaggle.py \
+  --mode suite \
+  --task scratch \
+  --dataset cifar10 \
+  --model resnet18 \
+  --epochs 40 \
+  --batch-size 128 \
+  --lr 0.1 \
+  --seeds 0 1 2 3 4 \
+  --methods cosine onecycle warmup_cosine plateau random_cosine random_onecycle l4_sgd hyper_sgd dadapt_sgd prodigy ours_cosine ours_onecycle ours_warmup_cosine
+```
+
+## Run ablations
+
+```bash
+python run_kaggle.py \
+  --mode ablation \
+  --task scratch \
+  --dataset cifar10 \
+  --model resnet18 \
+  --epochs 40 \
+  --batch-size 128 \
+  --lr 0.1 \
+  --seeds 0 1 2 3 4
+```
+
+Default ablation methods:
+
+```text
+cosine
+random_cosine
+ours_no_ema_cosine
+ours_no_kernel_cosine
+ours_no_clip_cosine
+ours_deadzone_cosine
+ours_cosine
+```
+
+## CLI controller overrides
+
+```bash
+python run_kaggle.py --mode suite --task scratch --dataset cifar10 --model resnet18 \
+  --methods ours_cosine random_cosine \
+  --alpha 0.95 --gamma 0.10 --m-win 5 --rho 0.8 --dead-zone-tau 0.005
+```
+
+Useful flags:
+
+- `--no-auto-beta`: use fixed beta instead of automatic beta calibration
+- `--beta-fixed 0.1`: set fixed beta and disable auto beta
+- `--variance-normalize`: normalize raw trend by EMA loss variance
+- `--absolute-trend`: use absolute difference instead of relative trend
 
 ## Output files
 
-For each run label we get:
+Each run writes:
 
-- `*_summary.json` — final metrics
-- `*_history.csv` — per-epoch metrics
+- `*_summary.json`: final metrics and method settings
+- `*_history.csv`: epoch-level train/validation history
+- `*_batch_history.csv`: batch-level LR/trend logs
 
-we also get:
+The script also writes:
 
 - `all_run_summaries.csv`
+- `aggregate_by_method.csv` with mean/std/95% CI
+- `paired_method_tests.csv` for selected paired comparisons
 
-## Notes
+## Recommended paper comparisons
 
-- `torchvision` is imported lazily inside dataset/model functions.
-- This means the smoke test can still run even if torchvision is broken locally.
-- If pretrained weights are unavailable, the project will skip failing runs when `skip_on_fail=True`.
+Minimum rival package:
 
+```text
+cosine
+onecycle
+warmup_cosine
+plateau
+random_cosine
+random_onecycle
+l4_sgd
+hyper_sgd
+ours_cosine
+ours_onecycle
+ours_warmup_cosine
+```
+
+Stronger package:
+
+```text
+cosine
+onecycle
+warmup_cosine
+warm_restarts
+plateau
+random_cosine
+random_onecycle
+random_warmup_cosine
+l4_sgd
+hyper_sgd
+dadapt_sgd
+prodigy
+ours_cosine
+ours_onecycle
+ours_warmup_cosine
+```
+
+## Why random bounded modulation matters
+
+The reviewer criticized the old theory because any bounded multiplicative LR perturbation would preserve the same generic SGD descent structure. The random bounded baseline directly tests this criticism:
+
+```math
+\eta_t = r_t(1 + \epsilon_t), \quad \epsilon_t \sim \mathrm{Uniform}[-\gamma,\gamma].
+```
+
+If `ours_cosine` beats `random_cosine`, the improvement is not just from bounded clipping; it comes from the EMA-loss feedback signal.

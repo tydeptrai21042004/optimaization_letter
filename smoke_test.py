@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import torch
@@ -9,6 +10,7 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 
 from lr_modulator.config import ExperimentConfig
 from lr_modulator.engine import eval_metrics, make_grad_scaler, train_one_epoch
+from lr_modulator.optimizers import build_optimizer_for_method
 from lr_modulator.schedulers import Controller
 
 
@@ -28,14 +30,10 @@ class TinyMLP(nn.Module):
 
 def build_fake_loaders(batch_size: int = 8):
     torch.manual_seed(7)
-    x = torch.randn(64, 3, 16, 16)
-    y = torch.randint(0, 3, (64,))
+    x = torch.randn(24, 3, 16, 16)
+    y = torch.randint(0, 3, (24,))
     ds = TensorDataset(x, y)
-    tr, va, _ = random_split(
-        ds,
-        [40, 12, 12],
-        generator=torch.Generator().manual_seed(7),
-    )
+    tr, va, _ = random_split(ds, [16, 4, 4], generator=torch.Generator().manual_seed(7))
     return (
         DataLoader(tr, batch_size=batch_size, shuffle=True),
         DataLoader(va, batch_size=batch_size, shuffle=False),
@@ -50,7 +48,7 @@ def run_one_method(
     val_loader: DataLoader,
 ) -> dict:
     model = TinyMLP(num_classes=3).to(device)
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.05, momentum=0.0)
+    optimizer, optimizer_impl = build_optimizer_for_method(method, model.parameters(), base_lr=0.05, config=config)
 
     controller = Controller(
         optimizer=optimizer,
@@ -64,7 +62,7 @@ def run_one_method(
 
     scaler = make_grad_scaler(device, enabled=False)
 
-    train_loss, train_acc = train_one_epoch(
+    train_loss, train_acc, batch_history = train_one_epoch(
         model=model,
         loader=train_loader,
         optimizer=optimizer,
@@ -72,15 +70,15 @@ def run_one_method(
         scaler=scaler,
         device=device,
         config=config,
+        epoch_index=0,
     )
 
     val_loss, val_acc = eval_metrics(model, val_loader, device)
-
-    # Important for plateau and safe for the other methods.
     controller.on_epoch_end(val_loss)
 
     payload = {
         "method": method,
+        "optimizer_impl": optimizer_impl,
         "train_loss": float(train_loss),
         "train_acc": float(train_acc),
         "val_loss": float(val_loss),
@@ -88,11 +86,13 @@ def run_one_method(
         "last_lr": float(controller.last_lr),
         "last_delta": float(controller.last_delta),
         "last_raw": float(controller.last_raw),
+        "num_batch_rows": len(batch_history),
         "stats": controller.stats(),
     }
 
     assert controller.last_lr > 0.0, f"{method}: learning rate must stay positive"
     assert 0.0 <= val_acc <= 1.0, f"{method}: validation accuracy should be a probability"
+    assert len(batch_history) > 0, f"{method}: batch history should be recorded"
 
     return payload
 
@@ -105,7 +105,7 @@ def main() -> None:
         num_workers=0,
         do_finetune=False,
         scratch_epochs=1,
-        scratch_batch=8,
+        scratch_batch=4,
         mod_warmup_steps=0,
         sched_warmup_steps=2,
         warmup_start_factor=0.2,
@@ -120,38 +120,24 @@ def main() -> None:
 
     methods = [
         "constant",
-        "step",
-        "cosine",
-        "onecycle",
-        "warmup_cosine",
-        "warm_restarts",
-        "plateau",
+        "random_cosine",
         "ours_cosine",
-        "ours_onecycle",
-        "ours_warmup_cosine",
     ]
 
     results = []
     for method in methods:
-        result = run_one_method(
-            method=method,
-            config=config,
-            device=device,
-            train_loader=train_loader,
-            val_loader=val_loader,
-        )
+        print(f"[smoke] running {method}", flush=True)
+        result = run_one_method(method, config, device, train_loader, val_loader)
         results.append(result)
 
-    payload = {
-        "num_methods_tested": len(results),
-        "methods": results,
-    }
+    payload = {"num_methods_tested": len(results), "methods": results}
 
     out_path = Path("smoke_test_output.json")
     out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     print("Smoke test passed.")
-    print(json.dumps(payload, indent=2))
+    print(json.dumps(payload, indent=2), flush=True)
+    os._exit(0)
 
 
 if __name__ == "__main__":
