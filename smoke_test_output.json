@@ -17,18 +17,18 @@
     {
       "method": "random_cosine",
       "optimizer_impl": "torch_sgd",
-      "train_loss": 1.1175982356071472,
-      "train_acc": 0.3125,
-      "val_loss": 1.1916122436523438,
+      "train_loss": 1.1179275512695312,
+      "train_acc": 0.25,
+      "val_loss": 1.191246509552002,
       "val_acc": 0.25,
-      "last_lr": 9.049992566452336e-05,
-      "last_delta": -0.09500074335476634,
-      "last_raw": -0.09500074335476634,
+      "last_lr": 9.103892090647794e-05,
+      "last_delta": -0.08961079093522072,
+      "last_raw": -0.08961079093522072,
       "num_batch_rows": 4,
       "stats": {
-        "random_delta_mean_abs": 0.05781192724261047,
+        "random_delta_mean_abs": 0.05584655398995245,
         "clip_rate": 0.0,
-        "delta_mean_abs_final": 0.05781192724261047
+        "delta_mean_abs_final": 0.05584655398995245
       }
     },
     {
@@ -49,7 +49,11 @@
         "beta_eff_mean": 3.0,
         "raw_abs_ema_final": 0.00035975079506969047,
         "last_ema": 1.1352746950281325,
-        "last_u": 0.5316761809012321
+        "last_u": 0.5316761809012321,
+        "last_loss_var": 0.00026622663133797836,
+        "clip_count": 0.0,
+        "emergency_clip_count": 0.0,
+        "total_mod_steps": 1.0
       }
     }
   ]

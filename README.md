@@ -160,3 +160,78 @@ The reviewer criticized the old theory because any bounded multiplicative LR per
 ```
 
 If `ours_cosine` beats `random_cosine`, the improvement is not just from bounded clipping; it comes from the EMA-loss feedback signal.
+
+## Reviewer-response additions
+
+The revised code supports the reviewer-requested experimental checks.
+
+### Hyperparameter sweep
+
+Run one-factor-at-a-time sensitivity analysis for \(\alpha, M, \rho, \beta, \gamma\):
+
+```bash
+python run_kaggle.py \
+  --mode hparam \
+  --task scratch \
+  --dataset cifar10 \
+  --model resnet18 \
+  --epochs 40 \
+  --seeds 0 1 2 3 4 \
+  --methods ours_cosine
+```
+
+Default grids:
+
+```text
+alpha: 0.80, 0.90, 0.95, 0.99
+M:     3, 5, 10, 20
+rho:   0.3, 0.5, 0.7, 0.9
+beta:  0.05, 0.10, 0.20, 0.50
+gamma: 0.05, 0.10, 0.20, 0.30
+```
+
+For beta sweeps, `use_auto_beta` is disabled automatically so the fixed beta value is actually used.
+
+### Plot generation
+
+After a run, create reviewer-facing plots from the saved CSV logs:
+
+```bash
+python plot_results.py --results-dir ./results_lr_modulator
+```
+
+The script generates plots for training/validation/test curves, learning-rate trajectories, modulation \(\delta_t\), raw trend signal, EMA/control signal, clipping frequency, gradient norm, and aggregate summaries.
+
+### Test accuracy per epoch
+
+`ExperimentConfig.eval_test_each_epoch` is enabled by default, so `*_history.csv` contains:
+
+```text
+test_loss, test_acc, generalization_gap
+```
+
+Disable it for faster large-scale runs:
+
+```bash
+python run_kaggle.py ... --no-eval-test-each-epoch
+```
+
+### Extra batch-level logging
+
+`*_batch_history.csv` now includes:
+
+```text
+base_lr, beta_eff, ema_loss, u_signal, clipped, emergency_clipped, grad_norm_sq
+```
+
+These columns are intended for the stability/noise/clipping analysis requested by the reviewer.
+
+### AdamW and official adaptive baselines
+
+`adamw` is included in the default scratch and fine-tuning method lists. For paper-grade D-Adaptation and Prodigy comparisons, install the official packages:
+
+```bash
+pip install dadaptation prodigyopt
+```
+
+If they are not installed, the code uses internal fallbacks and records `optimizer_impl="internal_fallback"` in the summary; do not report those fallback runs as official D-Adaptation/Prodigy results.

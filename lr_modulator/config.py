@@ -34,6 +34,9 @@ class ExperimentConfig:
     # Reproducibility / runtime
     deterministic: bool = True
     use_amp: bool = True
+    # Reviewer-facing curves. If True, test loss/accuracy are logged at every epoch.
+    # Disable for very large/time-constrained runs.
+    eval_test_each_epoch: bool = True
     num_workers: int = 2
     download: bool = True
 
@@ -57,6 +60,7 @@ class ExperimentConfig:
             "hyper_sgd",
             "dadapt_sgd",
             "prodigy",
+            "adamw",
             # Proposed method
             "ours_cosine",
             "ours_onecycle",
@@ -83,6 +87,7 @@ class ExperimentConfig:
             "hyper_sgd",
             "dadapt_sgd",
             "prodigy",
+            "adamw",
             "ours_cosine",
             "ours_onecycle",
             "ours_warmup_cosine",

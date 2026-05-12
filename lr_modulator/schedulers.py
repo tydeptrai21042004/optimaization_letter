@@ -278,6 +278,9 @@ class EMALossModulator:
         self.last_beta_eff = 0.0
         self.last_u = 0.0
         self.last_ema = 0.0
+        self.last_loss_var = 0.0
+        self.last_clipped = False
+        self.last_emergency_clipped = False
 
     def phi(self, z: float) -> float:
         z = max(float(z), 0.0)
@@ -328,6 +331,7 @@ class EMALossModulator:
             self.loss_var_ema = residual_sq
         else:
             self.loss_var_ema = var_alpha * self.loss_var_ema + (1.0 - var_alpha) * residual_sq
+        self.last_loss_var = float(self.loss_var_ema)
         return float(self.loss_var_ema)
 
     def _diff(self, u_prev: float, u_now: float) -> float:
@@ -446,6 +450,8 @@ class EMALossModulator:
         self.last_raw = float(raw_t)
         self.last_delta = float(delta_t)
         self.last_beta_eff = float(beta_eff)
+        self.last_clipped = bool(clipped)
+        self.last_emergency_clipped = bool(emergency_clipped)
         self.last_mod_lr = float(self.last_base_lr * (1.0 + delta_t))
         self._set_lr(self.last_mod_lr)
 
@@ -470,6 +476,10 @@ class EMALossModulator:
             "raw_abs_ema_final": float(self.raw_abs_ema) if self.raw_abs_ema is not None else 0.0,
             "last_ema": float(self.last_ema),
             "last_u": float(self.last_u),
+            "last_loss_var": float(self.last_loss_var),
+            "clip_count": float(self.clip_count),
+            "emergency_clip_count": float(self.emergency_clip_count),
+            "total_mod_steps": float(self.total_mod_steps),
         }
 
 
@@ -497,6 +507,12 @@ class RandomBoundedModulator:
         self.last_lr = float(self.base.current_lr)
         self.last_delta = 0.0
         self.last_raw = 0.0
+        self.last_base_lr = float(self.base.current_lr)
+        self.last_beta_eff = 0.0
+        self.last_ema = 0.0
+        self.last_u = 0.0
+        self.last_clipped = False
+        self.last_emergency_clipped = False
         self.delta_abs_sum = 0.0
         self.total_steps_seen = 0
 
@@ -508,8 +524,11 @@ class RandomBoundedModulator:
         base_lr = self.base.on_batch_end()
         gamma = _cfg_float(self.config, "random_delta_gamma", default=0.10)
         delta = float(np.random.uniform(-gamma, gamma))
+        self.last_base_lr = float(base_lr)
         self.last_delta = delta
         self.last_raw = delta
+        self.last_clipped = False
+        self.last_emergency_clipped = False
         self.last_lr = float(base_lr * (1.0 + delta))
         self.delta_abs_sum += abs(delta)
         self.total_steps_seen += 1
@@ -517,6 +536,7 @@ class RandomBoundedModulator:
 
     def on_epoch_end(self, metric: Optional[float] = None) -> None:
         base_lr = self.base.on_epoch_end(metric)
+        self.last_base_lr = float(base_lr)
         self.last_lr = float(base_lr * (1.0 + self.last_delta))
         self._set_lr(self.last_lr)
 
@@ -661,6 +681,14 @@ class OptimizerOnlyController:
 
 
 class Controller:
+    """Unified wrapper around base schedulers, proposed modulator, and rival optimizers.
+
+    Public attributes are intentionally normalized so the training loop can log the same
+    batch-level diagnostics for every method:
+      last_base_lr, last_lr, last_delta, last_raw, last_beta_eff, last_ema_loss,
+      last_u_signal, last_clipped, last_emergency_clipped, and last_grad_norm_sq.
+    """
+
     def __init__(
         self,
         optimizer: Optimizer,
@@ -671,7 +699,19 @@ class Controller:
         base_lr: float,
         min_lr: float,
     ) -> None:
+        self.optimizer = optimizer
+        self.config = config
         self.method = method
+        self.last_lr = float(optimizer.param_groups[0].get("lr", 0.0))
+        self.last_delta = 0.0
+        self.last_raw = 0.0
+        self.last_base_lr = float(self.last_lr)
+        self.last_beta_eff = 0.0
+        self.last_ema_loss = 0.0
+        self.last_u_signal = 0.0
+        self.last_clipped = False
+        self.last_emergency_clipped = False
+        self.last_grad_norm_sq = 0.0
 
         if method in {
             "constant",
@@ -780,6 +820,42 @@ class Controller:
         else:
             raise ValueError(f"Unknown method: {method}")
 
+        self._sync_public_state()
+
+    def _sync_public_state(self) -> None:
+        """Synchronize public logging attributes after each controller action."""
+        if self.kind == "base":
+            self.last_base_lr = float(self.base.current_lr)
+            self.last_beta_eff = 0.0
+            self.last_ema_loss = 0.0
+            self.last_u_signal = 0.0
+            self.last_clipped = False
+            self.last_emergency_clipped = False
+        elif self.kind == "mod":
+            self.last_base_lr = float(self.mod.last_base_lr)
+            self.last_beta_eff = float(self.mod.last_beta_eff)
+            self.last_ema_loss = float(self.mod.last_ema)
+            self.last_u_signal = float(self.mod.last_u)
+            self.last_clipped = bool(self.mod.last_clipped)
+            self.last_emergency_clipped = bool(self.mod.last_emergency_clipped)
+        elif self.kind == "random":
+            self.last_base_lr = float(self.random.last_base_lr)
+            self.last_beta_eff = 0.0
+            self.last_ema_loss = 0.0
+            self.last_u_signal = 0.0
+            self.last_clipped = False
+            self.last_emergency_clipped = False
+        else:
+            self.last_base_lr = float(self.optimizer.param_groups[0].get("lr", 0.0))
+            self.last_beta_eff = 0.0
+            self.last_ema_loss = 0.0
+            self.last_u_signal = 0.0
+            self.last_clipped = False
+            self.last_emergency_clipped = False
+
+    def set_grad_norm_sq(self, value: float) -> None:
+        self.last_grad_norm_sq = float(value)
+
     def on_after_backward(self, loss_value: float) -> None:
         if self.kind == "l4":
             self.l4.on_after_backward(loss_value)
@@ -793,6 +869,7 @@ class Controller:
             self.last_raw = self.hyper.last_raw
         elif self.kind == "optimizer_only":
             self.opt_only.on_after_backward(loss_value)
+        self._sync_public_state()
 
     def on_batch_end(self, loss_value: float) -> None:
         if self.kind == "base":
@@ -824,6 +901,7 @@ class Controller:
             self.last_lr = self.opt_only.last_lr
             self.last_delta = 0.0
             self.last_raw = 0.0
+        self._sync_public_state()
 
     def on_epoch_end(self, metric: Optional[float] = None) -> None:
         if self.kind == "base":
@@ -851,6 +929,7 @@ class Controller:
         elif self.kind == "optimizer_only":
             self.opt_only.on_epoch_end(metric)
             self.last_lr = self.opt_only.last_lr
+        self._sync_public_state()
 
     def stats(self) -> Dict[str, float]:
         if self.kind == "base":

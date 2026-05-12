@@ -8,6 +8,7 @@ from lr_modulator.experiments import (
     paired_method_tests,
     run_ablation_suite,
     run_all,
+    run_hparam_sweep,
     run_method_suite,
     summarize_replicates,
 )
@@ -55,9 +56,12 @@ def build_parser():
     p.add_argument(
         "--mode",
         type=str,
-        choices=["full", "suite", "ablation"],
+        choices=["full", "suite", "ablation", "hparam"],
         default="full",
-        help="full = run paper grid, suite = run selected methods, ablation = run reviewer ablation methods",
+        help=(
+            "full = run paper grid, suite = run selected methods, "
+            "ablation = component-removal ablations, hparam = alpha/M/rho/beta/gamma sweep"
+        ),
     )
 
     p.add_argument(
@@ -103,6 +107,11 @@ def build_parser():
     p.add_argument("--dead-zone-tau", type=float, default=None)
     p.add_argument("--variance-normalize", action="store_true")
     p.add_argument("--absolute-trend", action="store_true")
+    p.add_argument(
+        "--no-eval-test-each-epoch",
+        action="store_true",
+        help="Disable test-set evaluation at every epoch for faster large runs.",
+    )
 
     return p
 
@@ -128,6 +137,8 @@ def apply_cli_overrides(config: ExperimentConfig, args) -> None:
         config.variance_normalize = True
     if args.absolute_trend:
         config.relative_trend = False
+    if args.no_eval_test_each_epoch:
+        config.eval_test_each_epoch = False
 
 
 def main() -> None:
@@ -141,7 +152,7 @@ def main() -> None:
     if args.methods is not None:
         args.methods = validate_methods(args.methods)
 
-    if args.mode in {"suite", "ablation"}:
+    if args.mode in {"suite", "ablation", "hparam"}:
         if args.task is None or args.dataset is None or args.model is None:
             raise ValueError(f"--mode {args.mode} requires --task, --dataset, and --model")
 
@@ -158,7 +169,7 @@ def main() -> None:
                 seeds=args.seeds,
                 methods=args.methods,
             )
-        else:
+        elif args.mode == "ablation":
             if args.methods is not None:
                 config.ablation_methods = args.methods
             all_summaries = run_ablation_suite(
@@ -171,6 +182,19 @@ def main() -> None:
                 batch_size=args.batch_size,
                 base_lr=args.lr,
                 seeds=args.seeds,
+            )
+        else:
+            all_summaries = run_hparam_sweep(
+                config=config,
+                device=device,
+                task=args.task,
+                dataset=args.dataset,
+                model_name=args.model,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                base_lr=args.lr,
+                seeds=args.seeds,
+                methods=args.methods,
             )
     else:
         if args.methods is not None:

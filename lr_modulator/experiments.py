@@ -128,19 +128,58 @@ def summarize_replicates(summaries: Sequence[Dict], out_path: Optional[str] = No
             s.get("model"),
             s.get("method"),
             s.get("pretrained"),
+            s.get("hparam_name"),
+            s.get("hparam_value"),
+            s.get("alpha"),
+            s.get("gamma"),
+            s.get("m_win"),
+            s.get("rho"),
+            s.get("beta_fixed"),
+            s.get("use_auto_beta"),
         )
         grouped[key].append(s)
 
     rows: List[Dict] = []
-    metrics = ["best_val_acc", "test_acc", "test_loss", "time_sec", "clip_rate", "delta_mean_abs_final"]
+    metrics = [
+        "best_val_acc",
+        "test_acc",
+        "test_loss",
+        "time_sec",
+        "clip_rate",
+        "emergency_clip_rate",
+        "delta_mean_abs_final",
+        "beta_eff_mean",
+    ]
     for key, items in grouped.items():
-        task, dataset, model_name, method, pretrained = key
+        (
+            task,
+            dataset,
+            model_name,
+            method,
+            pretrained,
+            hparam_name,
+            hparam_value,
+            alpha,
+            gamma,
+            m_win,
+            rho,
+            beta_fixed,
+            use_auto_beta,
+        ) = key
         row: Dict[str, object] = {
             "task": task,
             "dataset": dataset,
             "model": model_name,
             "method": method,
             "pretrained": pretrained,
+            "hparam_name": hparam_name,
+            "hparam_value": hparam_value,
+            "alpha": alpha,
+            "gamma": gamma,
+            "m_win": m_win,
+            "rho": rho,
+            "beta_fixed": beta_fixed,
+            "use_auto_beta": use_auto_beta,
             "n_seeds": len(items),
             "seeds": ",".join(str(x.get("seed")) for x in items),
         }
@@ -260,6 +299,9 @@ def run_one(
     task_tag = "finetune" if pretrained else "scratch"
     lr_tag = f"{base_lr:.8g}".replace(".", "p")
     label = f"{label}_{task_tag}_ep{epochs}_bs{batch_size}_lr{lr_tag}"
+    label_suffix = getattr(config, "label_suffix", "")
+    if label_suffix:
+        label = f"{label}{label_suffix}"
 
     sum_path = summary_path(config.save_dir, label)
     hist_path = history_path(config.save_dir, label)
@@ -321,6 +363,7 @@ def run_one(
 
     summary = {
         "label": label,
+        "label_suffix": getattr(config, "label_suffix", ""),
         "dataset": dataset,
         "model": model_name,
         "method": method,
@@ -333,6 +376,7 @@ def run_one(
         "input_size": input_size,
         "deterministic": config.deterministic,
         "num_workers": config.num_workers,
+        "eval_test_each_epoch": config.eval_test_each_epoch,
         "optimizer_impl": optimizer_impl,
         "momentum": config.momentum,
         "weight_decay": config.weight_decay,
@@ -500,6 +544,154 @@ def run_ablation_suite(
         seeds=seeds,
         methods=config.ablation_methods,
     )
+
+
+
+def run_hparam_sweep(
+    config: ExperimentConfig,
+    device: torch.device,
+    task: str,
+    dataset: str,
+    model_name: str,
+    epochs: Optional[int] = None,
+    batch_size: Optional[int] = None,
+    base_lr: Optional[float] = None,
+    seeds: Optional[Sequence[int]] = None,
+    methods: Optional[Sequence[str]] = None,
+) -> List[Dict]:
+    """One-factor-at-a-time hyperparameter sweep for reviewer ablations.
+
+    Sweeps alpha, m_win, rho, beta_fixed, and gamma using the configured grids.
+    For beta_fixed sweeps, automatic beta is disabled so the requested beta value
+    is actually used. For all other sweeps, the original use_auto_beta setting is
+    preserved.
+    """
+    if task == "scratch":
+        pretrained = False
+        epochs = config.scratch_epochs if epochs is None else epochs
+        batch_size = config.scratch_batch if batch_size is None else batch_size
+        base_lr = config.lr_scratch if base_lr is None else base_lr
+    elif task == "finetune":
+        pretrained = True
+        epochs = config.finetune_epochs if epochs is None else epochs
+        batch_size = config.finetune_batch if batch_size is None else batch_size
+        base_lr = config.lr_finetune if base_lr is None else base_lr
+    else:
+        raise ValueError("task must be either 'scratch' or 'finetune'")
+
+    if seeds is None:
+        seeds = config.seeds
+    methods = list(methods) if methods is not None else ["ours_cosine"]
+
+    sweep_grid: List[Tuple[str, Sequence]] = [
+        ("alpha", config.ablation_alphas),
+        ("m_win", config.ablation_m_wins),
+        ("rho", config.ablation_rhos),
+        ("beta_fixed", config.ablation_betas),
+        ("gamma", config.ablation_gammas),
+    ]
+
+    original_values = {
+        "alpha": config.alpha,
+        "m_win": config.m_win,
+        "rho": config.rho,
+        "beta_fixed": config.beta_fixed,
+        "gamma": config.gamma,
+        "random_delta_gamma": config.random_delta_gamma,
+        "use_auto_beta": config.use_auto_beta,
+        "label_suffix": getattr(config, "label_suffix", ""),
+    }
+
+    all_summaries: List[Dict] = []
+    print("\n" + "=" * 120)
+    print(f"Running hyperparameter sweep | task={task} | dataset={dataset} | model={model_name}")
+    print(f"epochs={epochs} | batch_size={batch_size} | lr={base_lr} | methods={methods} | seeds={list(seeds)}")
+    print("=" * 120)
+
+    try:
+        for hparam_name, values in sweep_grid:
+            for value in values:
+                # Reset to the baseline config before every one-factor variation.
+                config.alpha = original_values["alpha"]
+                config.m_win = original_values["m_win"]
+                config.rho = original_values["rho"]
+                config.beta_fixed = original_values["beta_fixed"]
+                config.gamma = original_values["gamma"]
+                config.random_delta_gamma = original_values["random_delta_gamma"]
+                config.use_auto_beta = original_values["use_auto_beta"]
+                config.label_suffix = original_values["label_suffix"]
+
+                setattr(config, hparam_name, value)
+                safe_value = str(value).replace(".", "p").replace("-", "m")
+                config.label_suffix = f"__hparam_{hparam_name}_{safe_value}"
+                if hparam_name == "gamma":
+                    config.random_delta_gamma = float(value)
+                if hparam_name == "beta_fixed":
+                    config.use_auto_beta = False
+
+                for method in methods:
+                    for seed in seeds:
+                        _print_run_header(
+                            task=task,
+                            dataset=dataset,
+                            model_name=model_name,
+                            method=method,
+                            seed=seed,
+                            epochs=int(epochs),
+                            batch_size=int(batch_size),
+                            base_lr=float(base_lr),
+                            pretrained=pretrained,
+                        )
+                        print(f"[HPARAM] {hparam_name}={value}")
+                        try:
+                            summary = run_one(
+                                config=config,
+                                device=device,
+                                dataset=dataset,
+                                model_name=model_name,
+                                method=method,
+                                seed=int(seed),
+                                epochs=int(epochs),
+                                batch_size=int(batch_size),
+                                base_lr=float(base_lr),
+                                pretrained=pretrained,
+                            )
+                            if summary is not None:
+                                summary["hparam_name"] = hparam_name
+                                summary["hparam_value"] = value
+                                # Re-save so plot_results.py can discover hparam metadata from JSON files.
+                                if "label" in summary:
+                                    save_json(summary_path(config.save_dir, summary["label"]), summary)
+                                all_summaries.append(summary)
+                        except Exception as exc:
+                            err_msg = f"[FAIL] hparam={hparam_name} value={value} method={method} seed={seed} | reason: {repr(exc)}"
+                            print(err_msg)
+                            log_path = os.path.join(config.save_dir, "failed_runs.log")
+                            with open(log_path, "a", encoding="utf-8") as f:
+                                f.write(err_msg + "\n")
+                                f.write(traceback.format_exc() + "\n")
+                            if not (config.skip_on_fail and is_skippable_error(exc)):
+                                raise
+
+                        if config.should_stop():
+                            break
+                    if config.should_stop():
+                        break
+                if config.should_stop():
+                    break
+            if config.should_stop():
+                break
+    finally:
+        config.alpha = original_values["alpha"]
+        config.m_win = original_values["m_win"]
+        config.rho = original_values["rho"]
+        config.beta_fixed = original_values["beta_fixed"]
+        config.gamma = original_values["gamma"]
+        config.random_delta_gamma = original_values["random_delta_gamma"]
+        config.use_auto_beta = original_values["use_auto_beta"]
+        config.label_suffix = original_values["label_suffix"]
+
+    return all_summaries
 
 
 def run_all(config: ExperimentConfig, device: torch.device) -> List[Dict]:

@@ -27,6 +27,18 @@ def get_autocast_context(device: torch.device, enabled: bool):
         return torch.cuda.amp.autocast(enabled=True)
 
 
+def grad_norm_sq_from_optimizer(optimizer: torch.optim.Optimizer) -> float:
+    """Return global squared gradient norm after backward and unscale, before step."""
+    total = 0.0
+    for group in optimizer.param_groups:
+        for p in group["params"]:
+            if p.grad is None:
+                continue
+            g = p.grad.detach()
+            total += float(torch.sum(g * g).item())
+    return total
+
+
 @torch.no_grad()
 def eval_metrics(
     model: nn.Module,
@@ -88,6 +100,8 @@ def train_one_epoch(
             # Unscale before L4 / HyperSGD so their gradient norms/dots use true gradients.
             scaler.unscale_(optimizer)
             controller.on_after_backward(loss.item())
+            grad_norm_sq = grad_norm_sq_from_optimizer(optimizer)
+            controller.set_grad_norm_sq(grad_norm_sq)
             lr_after_backward = float(optimizer.param_groups[0]["lr"])
             scaler.step(optimizer)
             scaler.update()
@@ -96,6 +110,8 @@ def train_one_epoch(
             loss = crit(out, y)
             loss.backward()
             controller.on_after_backward(loss.item())
+            grad_norm_sq = grad_norm_sq_from_optimizer(optimizer)
+            controller.set_grad_norm_sq(grad_norm_sq)
             lr_after_backward = float(optimizer.param_groups[0]["lr"])
             optimizer.step()
 
@@ -118,8 +134,15 @@ def train_one_epoch(
                 "lr_used": lr_used,
                 "lr_after_backward": lr_after_backward,
                 "lr_next": lr_next,
+                "base_lr": float(controller.last_base_lr),
                 "delta": float(controller.last_delta),
                 "raw": float(controller.last_raw),
+                "beta_eff": float(controller.last_beta_eff),
+                "ema_loss": float(controller.last_ema_loss),
+                "u_signal": float(controller.last_u_signal),
+                "clipped": float(controller.last_clipped),
+                "emergency_clipped": float(controller.last_emergency_clipped),
+                "grad_norm_sq": float(controller.last_grad_norm_sq),
             }
         )
 
@@ -168,6 +191,10 @@ def fit(
         batch_history_all.extend(batch_history)
 
         va_loss, va_acc = eval_metrics(model, val_loader, device)
+        if config.eval_test_each_epoch:
+            te_loss_epoch, te_acc_epoch = eval_metrics(model, test_loader, device)
+        else:
+            te_loss_epoch, te_acc_epoch = float("nan"), float("nan")
 
         # Epoch-level controller update.  Important for ReduceLROnPlateau.
         controller.on_epoch_end(va_loss)
@@ -178,9 +205,18 @@ def fit(
             "train_acc": float(tr_acc),
             "val_loss": float(va_loss),
             "val_acc": float(va_acc),
+            "test_loss": float(te_loss_epoch),
+            "test_acc": float(te_acc_epoch),
+            "generalization_gap": float(tr_acc - va_acc),
             "last_lr": float(controller.last_lr),
+            "last_base_lr": float(controller.last_base_lr),
             "last_delta": float(controller.last_delta),
             "last_raw": float(controller.last_raw),
+            "last_beta_eff": float(controller.last_beta_eff),
+            "last_ema_loss": float(controller.last_ema_loss),
+            "last_u_signal": float(controller.last_u_signal),
+            "last_clip_flag": float(controller.last_clipped),
+            "last_emergency_clip_flag": float(controller.last_emergency_clipped),
         }
         history.append(row)
 
@@ -193,6 +229,7 @@ def fit(
             f"tr_acc={tr_acc:.4f} "
             f"va_acc={va_acc:.4f} "
             f"va_loss={va_loss:.4f} "
+            f"te_acc={te_acc_epoch:.4f} "
             f"lr={controller.last_lr:.6f}"
         )
 
