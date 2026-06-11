@@ -44,7 +44,11 @@ class ExperimentConfig:
     seeds: List[int] = field(default_factory=lambda: [0, 1, 2, 3, 4])
 
     scratch_datasets: List[str] = field(default_factory=lambda: ["cifar10", "cifar100"])
-    scratch_models: List[str] = field(default_factory=lambda: ["resnet18"])
+    regression_datasets: List[str] = field(default_factory=lambda: ["synthetic_regression"])
+    segmentation_datasets: List[str] = field(default_factory=lambda: ["synthetic_segmentation"])
+    scratch_models: List[str] = field(default_factory=lambda: ["resnet18", "small_resnet", "mobilenet_v3_small"])
+    regression_models: List[str] = field(default_factory=lambda: ["tiny_cnn", "small_cnn", "small_resnet"])
+    segmentation_models: List[str] = field(default_factory=lambda: ["tiny_unet", "unet_small", "fcn_lite"])
     scratch_methods: List[str] = field(
         default_factory=lambda: [
             # Existing schedules
@@ -68,6 +72,8 @@ class ExperimentConfig:
         ]
     )
     extra_baselines_cifar10: List[str] = field(default_factory=lambda: ["constant", "step"])
+    regression_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "random_cosine", "l4_sgd", "hyper_sgd", "ours_cosine"])
+    segmentation_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "random_cosine", "ours_cosine"])
 
     do_finetune: bool = True
     finetune_datasets: List[str] = field(default_factory=lambda: ["oxfordiiitpet"])
@@ -110,16 +116,24 @@ class ExperimentConfig:
     # Optimization
     scratch_epochs: int = 40
     finetune_epochs: int = 10
+    regression_epochs: int = 10
+    segmentation_epochs: int = 10
     scratch_batch: int = 128
     finetune_batch: int = 64
+    regression_batch: int = 64
+    segmentation_batch: int = 8
 
     momentum: float = 0.9
     weight_decay: float = 5e-4
     lr_scratch: float = 0.1
     lr_finetune: float = 0.01
+    lr_regression: float = 0.01
+    lr_segmentation: float = 0.01
     min_lr: float = 1e-4
     max_lr_factor: float = 10.0  # used by L4 / HyperSGD / fallback optimizers
     val_ratio: float = 0.1
+    task_type_override: str = "auto"
+    segmentation_ignore_index: int = 255
 
     # Step baseline
     step_size_epochs: int = 20

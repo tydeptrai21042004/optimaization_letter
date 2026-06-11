@@ -105,6 +105,25 @@ These tests check:
 
 Existing tests in `tests/test_scheduler_smoke.py` still check controller execution for the proposed methods, random modulation, L4, HyperSGD, D-Adaptation fallback, Prodigy fallback, old aliases, and the shifted next-step LR convention.
 
+Additional baseline-correctness tests are now included in:
+
+```text
+tests/test_baseline_correctness.py
+tests/test_full_runnability_matrix.py
+```
+
+These tests check:
+
+1. **Closed-form LR schedules**: `constant`, `step`, `cosine`, and `warmup_cosine` match their expected formulas.
+2. **Plateau behavior**: `plateau` changes LR only from epoch-level validation metrics.
+3. **Baseline isolation**: standard baselines are independent of the loss sequence and always log `last_delta=0`.
+4. **Random baseline bounds**: `random_cosine` always satisfies `|delta| <= random_delta_gamma` and `lr = base_lr * (1 + delta)`.
+5. **L4 formula check**: the first L4 update is compared against the closed-form loss-gap / gradient-norm rule.
+6. **HyperSGD formula check**: the second hypergradient update is compared against `lr_t + hyper_lr * <g_t, g_{t-1}>`.
+7. **Optimizer-only baselines**: `adamw`, `dadapt_sgd`, and `prodigy` instantiate correctly and record whether an official or internal fallback implementation is used.
+8. **Full runnability matrix**: all classification baseline/proposed methods run one training epoch; regression and segmentation method groups also run one epoch.
+9. **Task-aware summaries**: `fit()` returns `task_type`, `score_name`, `best_val_score`, and `test_score` for classification, regression, and segmentation.
+
 ---
 
 ## Quick smoke test
@@ -371,3 +390,228 @@ gamma: 0.05, 0.10, 0.20, 0.30
 ```
 
 For beta sweeps, `use_auto_beta` is disabled automatically so the fixed beta value is actually used.
+
+---
+
+## Multi-dataset and multi-task update
+
+This version is no longer limited to image classification. The training engine is now **task-aware** and automatically selects the correct loss and metric from the dataset registry.
+
+### Supported task types
+
+| Task type | Loss | Main validation/test metric | Example datasets |
+|---|---|---|---|
+| `classification` | cross entropy | accuracy | `cifar10`, `cifar100`, `svhn`, `mnist`, `fashionmnist`, `stl10`, `gtsrb`, `flowers102`, `food101`, `oxfordiiitpet`, `dtd`, `eurosat`, `country211`, `caltech101`, `caltech256`, `synthetic_classification` |
+| `regression` | mean squared error | RMSE | `synthetic_regression` |
+| `segmentation` | pixelwise cross entropy | pixel accuracy | `synthetic_segmentation`, `voc_segmentation`, `pet_segmentation` |
+
+The old classification fields such as `best_val_acc` and `test_acc` are still saved for backward compatibility. New generic fields are also saved: `task_type`, `score_name`, `best_val_score`, and `test_score`.
+
+### Expanded backbone and architecture support
+
+The model zoo now supports both **offline built-in models** and many **torchvision backbones**. Built-in models are useful for debugging, synthetic experiments, and CPU/Kaggle smoke tests because they do not require pretrained weight downloads. Torchvision models are intended for full real-dataset experiments.
+
+#### Built-in classification/regression models
+
+| Model | Main use |
+|---|---|
+| `tiny_mlp` | Very fast MLP baseline for synthetic/debug runs |
+| `tiny_cnn` | Minimal CNN smoke-test model |
+| `small_cnn` | Stronger small CNN baseline |
+| `depthwise_cnn` | MobileNet-style depthwise-separable CNN |
+| `small_resnet` | CIFAR-style residual network |
+| `wide_small_resnet` | Wider/deeper CIFAR-style residual network |
+| `mini_vit` | Lightweight ViT-style transformer with convolutional patch embedding |
+
+These models work for both `classification` and `regression`; only the final prediction head changes.
+
+#### Built-in segmentation models
+
+| Model | Main use |
+|---|---|
+| `tiny_unet` | Very fast synthetic segmentation smoke tests |
+| `unet_small` | U-Net baseline with skip connections |
+| `fcn_lite` | Lightweight fully convolutional segmentation baseline |
+| `deeplab_lite` | Tiny DeepLab-style atrous-context baseline |
+
+#### Torchvision classification backbones
+
+Supported names include ResNet/ResNeXt/Wide-ResNet, DenseNet, EfficientNet-B0--B7, EfficientNet-V2, MobileNet, MNASNet, ShuffleNet, SqueezeNet, ConvNeXt, RegNet, MaxViT, ViT, Swin/Swin-V2, AlexNet, VGG, GoogLeNet, and Inception-V3. Examples:
+
+```text
+resnet18, resnet50, resnet101, resnext50_32x4d, wide_resnet50_2,
+densenet121, densenet201, mobilenet_v3_small, efficientnet_b0, efficientnet_b7,
+efficientnet_v2_s, convnext_tiny, convnext_base, regnet_y_400mf,
+shufflenet_v2_x1_0, squeezenet1_1, vit_b_16, swin_t, swin_v2_t,
+alexnet, vgg16_bn, googlenet, inception_v3
+```
+
+The model builder replaces `fc`, `classifier`, `head`, or `heads` prediction heads automatically, so the same backbone can be used for different class counts or for scalar regression. For CIFAR-style scratch ResNets, the first convolution/max-pool are adapted safely to 32x32 input.
+
+#### Torchvision segmentation architectures
+
+```text
+fcn_resnet50, fcn_resnet101,
+deeplabv3_resnet50, deeplabv3_resnet101, deeplabv3_mobilenet_v3_large,
+lraspp_mobilenet_v3_large
+```
+
+The segmentation builder replaces the pixel classifier head automatically, including LR-ASPP's low/high classifiers.
+
+To list all currently supported names from Python:
+
+```bash
+python - <<'PY'
+from lr_modulator.model_zoo import list_supported_models
+print('classification/regression:', list_supported_models('classification'))
+print('segmentation:', list_supported_models('segmentation'))
+PY
+```
+
+
+### Backbone smoke-test commands
+
+Built-in classification/regression model smoke run:
+
+```bash
+python run_kaggle.py \
+  --mode suite \
+  --task scratch \
+  --dataset synthetic_classification \
+  --model small_resnet \
+  --epochs 1 \
+  --batch-size 8 \
+  --lr 0.01 \
+  --seeds 0 \
+  --methods cosine ours_cosine \
+  --no-eval-test-each-epoch
+```
+
+Built-in segmentation architecture smoke run:
+
+```bash
+python run_kaggle.py \
+  --mode suite \
+  --task segmentation \
+  --dataset synthetic_segmentation \
+  --model unet_small \
+  --epochs 1 \
+  --batch-size 4 \
+  --lr 0.01 \
+  --seeds 0 \
+  --methods cosine ours_cosine \
+  --no-eval-test-each-epoch
+```
+
+Real pretrained backbone example:
+
+```bash
+python run_kaggle.py \
+  --mode suite \
+  --task finetune \
+  --dataset oxfordiiitpet \
+  --model efficientnet_b0 \
+  --epochs 5 \
+  --batch-size 32 \
+  --lr 0.001 \
+  --seeds 0 \
+  --methods cosine ours_cosine
+```
+
+### Run task-aware examples
+
+Classification, unchanged from the old workflow:
+
+```bash
+python run_kaggle.py \
+  --mode suite \
+  --task scratch \
+  --dataset cifar10 \
+  --model resnet18 \
+  --epochs 2 \
+  --batch-size 128 \
+  --lr 0.1 \
+  --seeds 0 \
+  --methods cosine random_cosine ours_cosine
+```
+
+Regression smoke run:
+
+```bash
+python run_kaggle.py \
+  --mode suite \
+  --task regression \
+  --dataset synthetic_regression \
+  --model tiny_cnn \
+  --epochs 1 \
+  --batch-size 8 \
+  --lr 0.01 \
+  --seeds 0 \
+  --methods cosine random_cosine ours_cosine \
+  --no-eval-test-each-epoch
+```
+
+Segmentation smoke run:
+
+```bash
+python run_kaggle.py \
+  --mode suite \
+  --task segmentation \
+  --dataset synthetic_segmentation \
+  --model tiny_unet \
+  --epochs 1 \
+  --batch-size 4 \
+  --lr 0.01 \
+  --seeds 0 \
+  --methods cosine random_cosine ours_cosine \
+  --no-eval-test-each-epoch
+```
+
+Real segmentation example:
+
+```bash
+python run_kaggle.py \
+  --mode suite \
+  --task segmentation \
+  --dataset pet_segmentation \
+  --model fcn_resnet50 \
+  --epochs 5 \
+  --batch-size 4 \
+  --lr 0.01 \
+  --seeds 0 \
+  --methods cosine ours_cosine
+```
+
+### New tests
+
+Additional tests were added in:
+
+```text
+tests/test_task_types.py
+tests/test_model_zoo_backbones.py
+tests/conftest.py
+```
+
+They check that:
+
+1. the dataset registry contains classification, regression, and segmentation datasets;
+2. synthetic regression trains with `tiny_cnn` and reports RMSE;
+3. synthetic segmentation trains with `tiny_unet` and reports pixel accuracy;
+4. all built-in classification/regression backbones produce the correct output shape;
+5. all built-in segmentation architectures produce pixel logits with shape `[B, C, H, W]`;
+6. torchvision-like `fc`, `classifier`, `head`, `heads`, and convolutional classifier heads are replaced correctly;
+7. the supported model registry includes the newly added backbones.
+
+Run everything with:
+
+```bash
+bash run_all_checks.sh
+```
+
+Current validation result on this patched repo:
+
+```text
+24 passed
+Smoke test passed.
+synthetic_compare_old_new.py completed and printed the summary JSON.
+```

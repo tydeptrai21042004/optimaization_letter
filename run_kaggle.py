@@ -16,30 +16,45 @@ from lr_modulator.io_utils import save_aggregate_csv
 from lr_modulator.runtime import get_device, validate_methods
 
 
+def _summary_metric(s, key, fallback_key=None):
+    value = s.get(key, None)
+    if value is None and fallback_key is not None:
+        value = s.get(fallback_key, None)
+    try:
+        return float(value)
+    except Exception:
+        return float("nan")
+
+
 def print_summary_table(all_summaries):
-    print("\n" + "=" * 190)
+    print("\n" + "=" * 205)
     print(
-        f"{'dataset':<14}{'model':<20}{'method':<26}{'seed':>6}"
-        f"{'task':>12}{'epochs':>8}{'val':>10}{'test':>10}"
-        f"{'clip':>10}{'|d|':>10}{'beta_eff':>10}{'impl':>20}{'time(s)':>10}"
+        f"{'dataset':<22}{'model':<20}{'method':<26}{'seed':>6}"
+        f"{'task':>14}{'type':>15}{'score':>16}{'epochs':>8}"
+        f"{'val':>10}{'test':>10}{'clip':>10}{'|d|':>10}{'beta_eff':>10}{'impl':>20}{'time(s)':>10}"
     )
-    print("-" * 190)
+    print("-" * 205)
 
     for s in all_summaries:
         clip = s.get("clip_rate", None)
         dabs = s.get("delta_mean_abs_final", None)
         beta_eff = s.get("beta_eff_mean", None)
         impl = str(s.get("optimizer_impl", "-"))[:19]
+        score_name = str(s.get("score_name", "accuracy"))[:15]
+        val_metric = _summary_metric(s, "best_val_score", "best_val_acc")
+        test_metric = _summary_metric(s, "test_score", "test_acc")
 
         print(
-            f"{s['dataset']:<14}"
+            f"{s['dataset']:<22}"
             f"{s['model']:<20}"
             f"{s['method']:<26}"
             f"{s['seed']:>6}"
-            f"{s.get('task', '-'):>12}"
+            f"{s.get('task', '-'):>14}"
+            f"{s.get('task_type', '-'):>15}"
+            f"{score_name:>16}"
             f"{s.get('epochs', '-'):>8}"
-            f"{s['best_val_acc']:>10.4f}"
-            f"{s['test_acc']:>10.4f}"
+            f"{val_metric:>10.4f}"
+            f"{test_metric:>10.4f}"
             f"{('-' if clip is None else f'{clip:.4f}'):>10}"
             f"{('-' if dabs is None else f'{dabs:.4f}'):>10}"
             f"{('-' if beta_eff is None else f'{beta_eff:.3f}'):>10}"
@@ -47,8 +62,7 @@ def print_summary_table(all_summaries):
             f"{s['time_sec']:>10.1f}"
         )
 
-    print("=" * 190)
-
+    print("=" * 205)
 
 def build_parser():
     p = argparse.ArgumentParser()
@@ -67,12 +81,13 @@ def build_parser():
     p.add_argument(
         "--task",
         type=str,
-        choices=["scratch", "finetune"],
+        choices=["scratch", "finetune", "regression", "segmentation"],
         default=None,
-        help="Used in --mode suite/ablation",
+        help="Training mode or task type used in --mode suite/ablation/hparam",
     )
 
     p.add_argument("--dataset", type=str, default=None)
+    p.add_argument("--task-type", type=str, choices=["auto", "classification", "regression", "segmentation"], default="auto", help="Override dataset task type only for custom/experimental datasets.")
     p.add_argument("--model", type=str, default=None)
 
     p.add_argument("--epochs", type=int, default=None)
@@ -147,6 +162,8 @@ def apply_cli_overrides(config: ExperimentConfig, args) -> None:
         config.relative_trend = False
     if args.no_eval_test_each_epoch:
         config.eval_test_each_epoch = False
+    if getattr(args, "task_type", "auto") is not None:
+        config.task_type_override = args.task_type
 
 
 def main() -> None:

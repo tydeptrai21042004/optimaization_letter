@@ -31,6 +31,20 @@ class TinyMLP(nn.Module):
         return self.net(x)
 
 
+class TinyRegressor(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(3 * 16 * 16, 16),
+            nn.ReLU(inplace=True),
+            nn.Linear(16, 1),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
 def build_fake_loaders(batch_size: int = 8):
     torch.manual_seed(7)
     x = torch.randn(12, 3, 16, 16)
@@ -43,14 +57,27 @@ def build_fake_loaders(batch_size: int = 8):
     )
 
 
+def build_fake_regression_loaders(batch_size: int = 8):
+    torch.manual_seed(11)
+    x = torch.randn(12, 3, 16, 16)
+    y = (x[:, 0].mean(dim=(1, 2)) - 0.5 * x[:, 1].mean(dim=(1, 2))).unsqueeze(1)
+    ds = TensorDataset(x, y)
+    tr, va, _ = random_split(ds, [8, 2, 2], generator=torch.Generator().manual_seed(11))
+    return (
+        DataLoader(tr, batch_size=batch_size, shuffle=True),
+        DataLoader(va, batch_size=batch_size, shuffle=False),
+    )
+
+
 def run_one_method(
     method: str,
     config: ExperimentConfig,
     device: torch.device,
     train_loader: DataLoader,
     val_loader: DataLoader,
+    task_type: str = "classification",
 ) -> dict:
-    model = TinyMLP(num_classes=3).to(device)
+    model = (TinyRegressor() if task_type == "regression" else TinyMLP(num_classes=3)).to(device)
     optimizer, optimizer_impl = build_optimizer_for_method(method, model.parameters(), base_lr=0.05, config=config)
 
     controller = Controller(
@@ -65,7 +92,7 @@ def run_one_method(
 
     scaler = make_grad_scaler(device, enabled=False)
 
-    train_loss, train_acc, batch_history = train_one_epoch(
+    train_loss, train_score, batch_history = train_one_epoch(
         model=model,
         loader=train_loader,
         optimizer=optimizer,
@@ -74,18 +101,24 @@ def run_one_method(
         device=device,
         config=config,
         epoch_index=0,
+        task_type=task_type,
     )
 
-    val_loss, val_acc = eval_metrics(model, val_loader, device)
+    val_loss, val_score = eval_metrics(model, val_loader, device, task_type=task_type, config=config)
+    score_name = "rmse" if task_type == "regression" else "accuracy"
     controller.on_epoch_end(val_loss)
 
     payload = {
         "method": method,
+        "task_type": task_type,
         "optimizer_impl": optimizer_impl,
+        "score_name": score_name,
         "train_loss": float(train_loss),
-        "train_acc": float(train_acc),
+        "train_score": float(train_score),
         "val_loss": float(val_loss),
-        "val_acc": float(val_acc),
+        "val_score": float(val_score),
+        "train_acc": float(train_score) if task_type == "classification" else float("nan"),
+        "val_acc": float(val_score) if task_type == "classification" else float("nan"),
         "last_lr": float(controller.last_lr),
         "last_delta": float(controller.last_delta),
         "last_raw": float(controller.last_raw),
@@ -94,7 +127,10 @@ def run_one_method(
     }
 
     assert controller.last_lr > 0.0, f"{method}: learning rate must stay positive"
-    assert 0.0 <= val_acc <= 1.0, f"{method}: validation accuracy should be a probability"
+    if task_type == "classification":
+        assert 0.0 <= val_score <= 1.0, f"{method}: validation accuracy should be a probability"
+    else:
+        assert val_score >= 0.0, f"{method}: regression RMSE should be non-negative"
     assert len(batch_history) > 0, f"{method}: batch history should be recorded"
 
     return payload
@@ -120,6 +156,7 @@ def main() -> None:
     device = torch.device("cpu")
 
     train_loader, val_loader = build_fake_loaders(batch_size=config.scratch_batch)
+    reg_train_loader, reg_val_loader = build_fake_regression_loaders(batch_size=config.scratch_batch)
 
     methods = [
         "constant",
@@ -129,9 +166,12 @@ def main() -> None:
 
     results = []
     for method in methods:
-        print(f"[smoke] running {method}", flush=True)
-        result = run_one_method(method, config, device, train_loader, val_loader)
+        print(f"[smoke] running classification {method}", flush=True)
+        result = run_one_method(method, config, device, train_loader, val_loader, task_type="classification")
         results.append(result)
+
+    print("[smoke] running regression ours_cosine", flush=True)
+    results.append(run_one_method("ours_cosine", config, device, reg_train_loader, reg_val_loader, task_type="regression"))
 
     payload = {"num_methods_tested": len(results), "methods": results}
 
