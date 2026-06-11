@@ -214,17 +214,21 @@ class BatchBaseSchedule:
 
 
 class EMALossModulator:
-    """Bounded causal EMA-loss-trend learning-rate modulator.
+    """Delayed weighted h-Hartley--cosine loss-feedback LR modulator.
 
-    The implementation follows the adapted online convention used in the revised
-    theory: after batch t, loss L_t is observed, a modulation delta_t is computed,
-    and the optimizer LR is set to eta_{t+1}=r_{t+1}(1+delta_t) for the next batch.
+    The class name is kept for backward compatibility with older scripts, but the
+    implemented proposed method is no longer an EMA-only controller.  After batch
+    t, the observed loss L_t is mapped to a bounded signal u_t, filtered by a
+    delayed weighted h-Hartley--cosine convolution, converted into a backward
+    filtered-loss trend, normalized by local loss-signal noise, gated by a trend
+    confidence threshold, and clipped before modulating the next base LR:
 
-    Improvements over the original version:
-      * optional bias-corrected EMA;
-      * optional relative trend signal to reduce loss-scale sensitivity;
-      * optional dead-zone and variance normalization for noise robustness;
-      * method-name ablations for no-EMA, no-kernel, no-clipping variants.
+        eta_{t+1} = r_{t+1} (1 + delta_t).
+
+    The delay D=M+1 is essential.  Direct evaluation of the two-sided generalized
+    convolution at index t would require future losses up to t+M+1.  Evaluating it
+    at t-D makes the largest required index equal to t, so the next-step LR rule
+    remains adapted to the training history.
     """
 
     def __init__(
@@ -251,39 +255,63 @@ class EMALossModulator:
             min_lr=min_lr,
         )
 
-        self.m_win = max(1, _cfg_int(config, "m_win", default=5))
-        self.ema: Optional[float] = None
-        self.ema_step = 0
-        self.loss_var_ema: Optional[float] = None
-        self.hist = deque(maxlen=self.m_win + 1)
-        self.batch_idx = 0
+        self.m_win = max(1, _cfg_int(config, "m_win", default=3))
+        self.h_step = max(1e-12, _cfg_float(config, "hc_h", "h_step", default=1.0))
+        delay_cfg = _cfg_int(config, "hc_delay", default=0)
+        self.hc_delay = delay_cfg if delay_cfg > 0 else self.m_win + 1
+        # z_t requires nonnegative indices down to t-D-M-1.  q_t=z_{t-1}-z_t
+        # therefore needs t >= D+M+2.  With D=M+1 this is 2M+3.
+        self.hc_min_warmup = self.hc_delay + self.m_win + 2
+        self.mod_warmup_steps = max(0, _mod_warmup_steps(config), self.hc_min_warmup)
 
-        rho = _cfg_float(config, "rho", default=0.9)
-        z = sum(rho ** (j - 1) for j in range(1, self.m_win + 1))
-        self.kernel = [(rho ** (m - 1)) / (z + 1e-12) for m in range(1, self.m_win + 1)]
+        self.hc_kernel = self._build_hc_kernel()
+        self.hc_kernel_l1 = float(self.h_step * sum(abs(v) for v in self.hc_kernel.values()))
 
+        self.u_hist: List[float] = []
+        self.loss_signal_var: Optional[float] = None
         self.raw_abs_ema: Optional[float] = None
         self.raw_abs_alpha = 0.98
+        self.batch_idx = 0
 
         self.clip_count = 0
         self.emergency_clip_count = 0
         self.total_mod_steps = 0
+        self.active_mod_steps = 0
         self.delta_abs_sum = 0.0
         self.beta_eff_sum = 0.0
 
         self.last_raw = 0.0
+        self.last_score = 0.0
         self.last_delta = 0.0
         self.last_base_lr = float(self.base.current_lr)
         self.last_mod_lr = float(self.base.current_lr)
         self.last_beta_eff = 0.0
         self.last_u = 0.0
-        self.last_ema = 0.0
+        self.last_ema = 0.0  # public logging alias: stores filtered HC value z_t.
         self.last_loss_var = 0.0
+        self.last_hc_z = 0.0
         self.last_clipped = False
         self.last_emergency_clipped = False
+        self.last_gate_active = False
+
+    def _build_hc_kernel(self) -> Dict[int, float]:
+        """Build a finite-support symmetric weighted HC kernel.
+
+        The raw weights are rho**abs(m), m=-M,...,M.  They are normalized so that
+        a constant input approximately remains constant under the four-shift HC
+        convolution: (h/2)*sum_m kappa_m*(4u) = u.
+        """
+        rho = float(np.clip(_cfg_float(self.config, "rho", default=0.8), 0.0, 0.999999))
+        raw = {m: rho ** abs(m) for m in range(-self.m_win, self.m_win + 1)}
+        total = sum(raw.values()) + 1e-12
+        norm = 1.0 / (2.0 * self.h_step * total)
+        return {m: float(w * norm) for m, w in raw.items()}
 
     def phi(self, z: float) -> float:
+        """Bounded monotone loss map used before convolution."""
         z = max(float(z), 0.0)
+        if self.variant in {"no_phi", "no_ema"} or not bool(_cfg_get(self.config, "use_phi", default=True)):
+            return z
         c_phi = _cfg_float(self.config, "c_phi", default=1.0)
         return z / (c_phi + z + 1e-12)
 
@@ -292,166 +320,182 @@ class EMALossModulator:
         for pg in self.optimizer.param_groups:
             pg["lr"] = lr
 
-    def _use_ema(self) -> bool:
-        return bool(_cfg_get(self.config, "use_ema", default=True)) and self.variant != "no_ema"
+    def _use_hc_convolution(self) -> bool:
+        return bool(_cfg_get(self.config, "use_kernel", "use_hc_convolution", default=True)) and self.variant not in {
+            "no_kernel",
+            "no_hc",
+        }
 
-    def _use_kernel(self) -> bool:
-        return bool(_cfg_get(self.config, "use_kernel", default=True)) and self.variant != "no_kernel"
+    def _use_noise_normalization(self) -> bool:
+        return bool(_cfg_get(self.config, "variance_normalize", "noise_normalize", default=True)) and self.variant not in {
+            "no_noise_norm",
+        }
 
     def _use_clipping(self) -> bool:
         return bool(_cfg_get(self.config, "use_clipping", default=True)) and self.variant != "no_clip"
 
-    def _dead_zone_tau(self) -> float:
-        tau = _cfg_float(self.config, "dead_zone_tau", default=0.0)
-        if self.variant == "deadzone" and tau <= 0.0:
-            return 5e-3
-        return tau
-
-    def _update_ema(self, loss_value: float) -> float:
-        alpha = _cfg_float(self.config, "alpha", default=0.9)
-        if self.ema is None:
-            # Start at zero to make bias correction meaningful.
-            self.ema = 0.0
-            self.ema_step = 0
-
-        self.ema = alpha * self.ema + (1.0 - alpha) * loss_value
-        self.ema_step += 1
-
-        if bool(_cfg_get(self.config, "bias_correct_ema", default=True)):
-            ema_used = self.ema / (1.0 - alpha ** self.ema_step + 1e-12)
-        else:
-            ema_used = self.ema
-        self.last_ema = float(ema_used)
-        return float(ema_used)
-
-    def _update_variance(self, loss_value: float, ema_used: float) -> float:
-        var_alpha = _cfg_float(self.config, "var_alpha", default=0.95)
-        residual_sq = float((loss_value - ema_used) ** 2)
-        if self.loss_var_ema is None:
-            self.loss_var_ema = residual_sq
-        else:
-            self.loss_var_ema = var_alpha * self.loss_var_ema + (1.0 - var_alpha) * residual_sq
-        self.last_loss_var = float(self.loss_var_ema)
-        return float(self.loss_var_ema)
-
-    def _diff(self, u_prev: float, u_now: float) -> float:
-        if bool(_cfg_get(self.config, "relative_trend", default=True)):
-            eps = _cfg_float(self.config, "eps_trend", default=1e-8)
-            return (u_prev - u_now) / (abs(u_prev) + eps)
-        return u_prev - u_now
-
-    def _raw(self, u_now: float) -> float:
-        if len(self.hist) < 2:
+    def _trend_conf_tau(self) -> float:
+        # Backward-compatible with the earlier dead_zone_tau argument.
+        tau = _cfg_float(self.config, "trend_conf_tau", "dead_zone_tau", default=0.25)
+        if self.variant in {"no_gate", "no_deadzone"}:
             return 0.0
+        if self.variant == "deadzone" and tau <= 0.0:
+            return 0.25
+        return max(0.0, tau)
 
-        normalize_raw = bool(_cfg_get(self.config, "normalize_raw", default=False))
+    def _update_signal_variance(self, u: float) -> float:
+        var_alpha = _cfg_float(self.config, "var_alpha", default=0.95)
+        if len(self.u_hist) < 2:
+            residual_sq = 0.0
+        else:
+            residual_sq = float((self.u_hist[-1] - self.u_hist[-2]) ** 2)
+        if self.loss_signal_var is None:
+            self.loss_signal_var = residual_sq
+        else:
+            self.loss_signal_var = var_alpha * self.loss_signal_var + (1.0 - var_alpha) * residual_sq
+        self.last_loss_var = float(self.loss_signal_var)
+        return float(self.loss_signal_var)
 
-        if not self._use_kernel():
-            raw = self._diff(self.hist[-2], u_now)
-            return float(np.sign(raw)) if normalize_raw and abs(raw) > 1e-12 else float(raw)
+    def _hc_conv_at(self, n: int) -> Optional[float]:
+        """Evaluate (kappa *_gamma u)(nh) with finite history.
 
-        raw = 0.0
-        scale = 0.0
-        for m in range(1, self.m_win + 1):
-            u_prev = self.hist[-1 - m]
-            diff = self._diff(u_prev, u_now)
-            w = self.kernel[m - 1]
-            raw += w * diff
-            scale += w * abs(diff)
+        Returns None if the delayed index still needs unavailable samples.  With
+        the enforced warm-up and D=M+1, this should not happen during active use.
+        """
+        if n < 0:
+            return None
+        acc = 0.0
+        last = len(self.u_hist) - 1
+        for m, kappa_m in self.hc_kernel.items():
+            idxs = (n - m - 1, n - m + 1, n + m + 1, n + m - 1)
+            if min(idxs) < 0 or max(idxs) > last:
+                return None
+            acc += kappa_m * sum(self.u_hist[j] for j in idxs)
+        return float(0.5 * self.h_step * acc)
 
-        return raw / (scale + 1e-12) if normalize_raw else raw
+    def max_index_used_by_delayed_hc(self, t: int) -> int:
+        """Largest signal index used by z_t; useful for causality tests."""
+        n = int(t) - self.hc_delay
+        return n + self.m_win + 1
+
+    def min_index_used_by_delayed_hc(self, t: int) -> int:
+        """Smallest signal index used by z_t; useful for warm-up tests."""
+        n = int(t) - self.hc_delay
+        return n - self.m_win - 1
+
+    def _hc_trend(self, t: int) -> Optional[float]:
+        z_now = self._hc_conv_at(t - self.hc_delay)
+        z_prev = self._hc_conv_at(t - 1 - self.hc_delay)
+        if z_now is None or z_prev is None:
+            return None
+        self.last_hc_z = float(z_now)
+        self.last_ema = float(z_now)
+        q = float(z_prev - z_now)
+        if bool(_cfg_get(self.config, "relative_trend", default=False)):
+            eps = _cfg_float(self.config, "eps_trend", default=1e-8)
+            q = q / (abs(z_prev) + eps)
+        return q
+
+    def _simple_causal_trend(self) -> Optional[float]:
+        if len(self.u_hist) < 2:
+            return None
+        q = self.u_hist[-2] - self.u_hist[-1]
+        if bool(_cfg_get(self.config, "relative_trend", default=False)):
+            eps = _cfg_float(self.config, "eps_trend", default=1e-8)
+            q = q / (abs(self.u_hist[-2]) + eps)
+        self.last_hc_z = float(self.u_hist[-1])
+        self.last_ema = float(self.u_hist[-1])
+        return float(q)
 
     def _beta_eff(self) -> float:
-        use_auto_beta = bool(_cfg_get(self.config, "use_auto_beta", default=False))
-        beta_fixed = _cfg_float(self.config, "beta_fixed", default=0.5)
-        beta_cap = _cfg_float(self.config, "beta_cap", default=1.0)
-        target_mean_abs_delta = _cfg_float(self.config, "target_mean_abs_delta", default=0.05)
+        use_auto_beta = bool(_cfg_get(self.config, "use_auto_beta", default=True))
+        beta_fixed = _cfg_float(self.config, "beta_fixed", default=0.08)
+        beta_cap = _cfg_float(self.config, "beta_cap", default=3.0)
+        target_mean_abs_delta = _cfg_float(self.config, "target_mean_abs_delta", default=0.02)
 
         if not use_auto_beta:
             return beta_fixed
 
         if self.raw_abs_ema is None or self.raw_abs_ema < 1e-8:
-            return float(min(beta_cap, max(beta_fixed, 0.5)))
+            return float(min(beta_cap, max(beta_fixed, 0.08)))
 
         beta = target_mean_abs_delta / (self.raw_abs_ema + 1e-12)
         return float(np.clip(beta, 0.0, beta_cap))
 
-    def _apply_dead_zone(self, z: float) -> float:
-        tau = self._dead_zone_tau()
-        if tau <= 0.0:
-            return z
-        if abs(z) <= tau:
-            return 0.0
-        return math.copysign(abs(z) - tau, z)
-
     def on_batch_end(self, loss_value: float) -> None:
         loss_value = float(loss_value)
         gamma = _cfg_float(self.config, "gamma", default=0.1)
-        mod_warmup = max(0, _mod_warmup_steps(self.config))
 
-        ema_used = self._update_ema(loss_value)
-        signal_value = ema_used if self._use_ema() else loss_value
-        u = self.phi(signal_value)
+        u = self.phi(loss_value)
         self.last_u = float(u)
-        self.hist.append(u)
-        self._update_variance(loss_value, ema_used)
+        self.u_hist.append(float(u))
+        var = self._update_signal_variance(u)
 
-        # Advance base schedule first.  The modulation computed from loss_t is then
+        # Advance the base schedule first.  The modulation computed from loss_t is
         # applied to r_{t+1}, so the next optimizer step uses eta_{t+1}.
         self.last_base_lr = self.base.on_batch_end()
 
         raw_t = 0.0
+        score_t = 0.0
         delta_t = 0.0
         clipped = False
         emergency_clipped = False
         beta_eff = 0.0
+        gate_active = False
 
-        if self.batch_idx >= mod_warmup and len(self.hist) >= self.m_win + 1:
-            raw_t = self._raw(u)
+        if self.batch_idx >= self.mod_warmup_steps:
+            trend = self._hc_trend(self.batch_idx) if self._use_hc_convolution() else self._simple_causal_trend()
+            if trend is not None:
+                raw_t = float(trend)
+                score_t = raw_t
+                if self._use_noise_normalization():
+                    eps = _cfg_float(self.config, "eps_trend", default=1e-8)
+                    score_t = raw_t / (math.sqrt(max(var, 0.0)) + eps)
 
-            if bool(_cfg_get(self.config, "variance_normalize", default=False)):
-                eps = _cfg_float(self.config, "eps_trend", default=1e-8)
-                var = 0.0 if self.loss_var_ema is None else self.loss_var_ema
-                raw_t = raw_t / (math.sqrt(max(var, 0.0)) + eps)
+                abs_score = abs(score_t)
+                if self.raw_abs_ema is None:
+                    self.raw_abs_ema = abs_score
+                else:
+                    self.raw_abs_ema = self.raw_abs_alpha * self.raw_abs_ema + (1.0 - self.raw_abs_alpha) * abs_score
 
-            abs_raw = abs(raw_t)
-            if self.raw_abs_ema is None:
-                self.raw_abs_ema = abs_raw
-            else:
-                self.raw_abs_ema = self.raw_abs_alpha * self.raw_abs_ema + (1.0 - self.raw_abs_alpha) * abs_raw
+                beta_eff = self._beta_eff()
+                tau = self._trend_conf_tau()
+                gate_active = abs_score >= tau
+                if gate_active:
+                    delta_t = beta_eff * score_t
 
-            beta_eff = self._beta_eff()
-            delta_t = self._apply_dead_zone(beta_eff * raw_t)
+                    if self._use_clipping():
+                        if delta_t > gamma:
+                            delta_t = gamma
+                            clipped = True
+                        elif delta_t < -gamma:
+                            delta_t = -gamma
+                            clipped = True
+                    else:
+                        # No-clipping ablation still keeps LR positive to avoid invalid optimizer state.
+                        floor = _cfg_float(self.config, "emergency_delta_floor", default=-0.95)
+                        ceil = _cfg_float(self.config, "emergency_delta_ceiling", default=5.0)
+                        if delta_t < floor:
+                            delta_t = floor
+                            emergency_clipped = True
+                        elif delta_t > ceil:
+                            delta_t = ceil
+                            emergency_clipped = True
 
-            if self._use_clipping():
-                if delta_t > gamma:
-                    delta_t = gamma
-                    clipped = True
-                elif delta_t < -gamma:
-                    delta_t = -gamma
-                    clipped = True
-            else:
-                # No-clipping ablation still keeps LR positive to avoid invalid optimizer state.
-                floor = _cfg_float(self.config, "emergency_delta_floor", default=-0.95)
-                ceil = _cfg_float(self.config, "emergency_delta_ceiling", default=5.0)
-                if delta_t < floor:
-                    delta_t = floor
-                    emergency_clipped = True
-                elif delta_t > ceil:
-                    delta_t = ceil
-                    emergency_clipped = True
-
-            self.total_mod_steps += 1
-            self.clip_count += int(clipped)
-            self.emergency_clip_count += int(emergency_clipped)
-            self.delta_abs_sum += abs(delta_t)
-            self.beta_eff_sum += beta_eff
+                self.total_mod_steps += 1
+                self.active_mod_steps += int(gate_active)
+                self.clip_count += int(clipped)
+                self.emergency_clip_count += int(emergency_clipped)
+                self.delta_abs_sum += abs(delta_t)
+                self.beta_eff_sum += beta_eff
 
         self.last_raw = float(raw_t)
+        self.last_score = float(score_t)
         self.last_delta = float(delta_t)
         self.last_beta_eff = float(beta_eff)
         self.last_clipped = bool(clipped)
         self.last_emergency_clipped = bool(emergency_clipped)
+        self.last_gate_active = bool(gate_active)
         self.last_mod_lr = float(self.last_base_lr * (1.0 + delta_t))
         self._set_lr(self.last_mod_lr)
 
@@ -465,20 +509,27 @@ class EMALossModulator:
     def stats(self) -> Dict[str, float]:
         clip_rate = 0.0 if self.total_mod_steps == 0 else self.clip_count / self.total_mod_steps
         emergency_clip_rate = 0.0 if self.total_mod_steps == 0 else self.emergency_clip_count / self.total_mod_steps
+        active_rate = 0.0 if self.total_mod_steps == 0 else self.active_mod_steps / self.total_mod_steps
         delta_mean_abs = 0.0 if self.total_mod_steps == 0 else self.delta_abs_sum / self.total_mod_steps
         beta_eff_mean = 0.0 if self.total_mod_steps == 0 else self.beta_eff_sum / self.total_mod_steps
 
         return {
             "clip_rate": float(clip_rate),
             "emergency_clip_rate": float(emergency_clip_rate),
+            "active_mod_rate": float(active_rate),
             "delta_mean_abs_final": float(delta_mean_abs),
             "beta_eff_mean": float(beta_eff_mean),
             "raw_abs_ema_final": float(self.raw_abs_ema) if self.raw_abs_ema is not None else 0.0,
-            "last_ema": float(self.last_ema),
+            "last_hc_z": float(self.last_hc_z),
+            "last_score": float(self.last_score),
             "last_u": float(self.last_u),
             "last_loss_var": float(self.last_loss_var),
+            "hc_delay": float(self.hc_delay),
+            "hc_warmup_steps": float(self.mod_warmup_steps),
+            "hc_kernel_l1": float(self.hc_kernel_l1),
             "clip_count": float(self.clip_count),
             "emergency_clip_count": float(self.emergency_clip_count),
+            "active_mod_steps": float(self.active_mod_steps),
             "total_mod_steps": float(self.total_mod_steps),
         }
 
@@ -740,9 +791,14 @@ class Controller:
             "ours_cosine",
             "ours_onecycle",
             "ours_warmup_cosine",
+            "ours_no_hc_cosine",
+            "ours_no_noise_norm_cosine",
+            "ours_no_gate_cosine",
+            "ours_no_phi_cosine",
+            "ours_no_clip_cosine",
+            # Backward-compatible aliases from the old EMA manuscript version.
             "ours_no_ema_cosine",
             "ours_no_kernel_cosine",
-            "ours_no_clip_cosine",
             "ours_deadzone_cosine",
         }:
             self.kind = "mod"
@@ -750,15 +806,24 @@ class Controller:
                 "ours_cosine": "cosine",
                 "ours_onecycle": "onecycle",
                 "ours_warmup_cosine": "warmup_cosine",
+                "ours_no_hc_cosine": "cosine",
+                "ours_no_noise_norm_cosine": "cosine",
+                "ours_no_gate_cosine": "cosine",
+                "ours_no_phi_cosine": "cosine",
+                "ours_no_clip_cosine": "cosine",
                 "ours_no_ema_cosine": "cosine",
                 "ours_no_kernel_cosine": "cosine",
-                "ours_no_clip_cosine": "cosine",
                 "ours_deadzone_cosine": "cosine",
             }[method]
             variant = {
-                "ours_no_ema_cosine": "no_ema",
-                "ours_no_kernel_cosine": "no_kernel",
+                "ours_no_hc_cosine": "no_hc",
+                "ours_no_noise_norm_cosine": "no_noise_norm",
+                "ours_no_gate_cosine": "no_gate",
+                "ours_no_phi_cosine": "no_phi",
                 "ours_no_clip_cosine": "no_clip",
+                # Old aliases.
+                "ours_no_ema_cosine": "no_phi",
+                "ours_no_kernel_cosine": "no_hc",
                 "ours_deadzone_cosine": "deadzone",
             }.get(method, "full")
 

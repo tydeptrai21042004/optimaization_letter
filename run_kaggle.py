@@ -104,7 +104,9 @@ def build_parser():
     p.add_argument("--rho", type=float, default=None)
     p.add_argument("--beta-fixed", type=float, default=None)
     p.add_argument("--no-auto-beta", action="store_true")
-    p.add_argument("--dead-zone-tau", type=float, default=None)
+    p.add_argument("--dead-zone-tau", type=float, default=None, help="Legacy alias for --trend-conf-tau")
+    p.add_argument("--trend-conf-tau", type=float, default=None)
+    p.add_argument("--hc-h", type=float, default=None)
     p.add_argument("--variance-normalize", action="store_true")
     p.add_argument("--absolute-trend", action="store_true")
     p.add_argument(
@@ -133,6 +135,12 @@ def apply_cli_overrides(config: ExperimentConfig, args) -> None:
         config.use_auto_beta = False
     if args.dead_zone_tau is not None:
         config.dead_zone_tau = args.dead_zone_tau
+        config.trend_conf_tau = args.dead_zone_tau
+    if args.trend_conf_tau is not None:
+        config.trend_conf_tau = args.trend_conf_tau
+        config.dead_zone_tau = args.trend_conf_tau
+    if args.hc_h is not None:
+        config.hc_h = args.hc_h
     if args.variance_normalize:
         config.variance_normalize = True
     if args.absolute_trend:

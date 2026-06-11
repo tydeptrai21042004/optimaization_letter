@@ -217,8 +217,9 @@ def paired_method_tests(
             ("ours_onecycle", "onecycle"),
             ("ours_onecycle", "random_onecycle"),
             ("ours_warmup_cosine", "warmup_cosine"),
-            ("ours_no_ema_cosine", "ours_cosine"),
-            ("ours_no_kernel_cosine", "ours_cosine"),
+            ("ours_no_hc_cosine", "ours_cosine"),
+            ("ours_no_noise_norm_cosine", "ours_cosine"),
+            ("ours_no_gate_cosine", "ours_cosine"),
         ]
 
     # group by task/dataset/model/pretrained, then by method/seed
@@ -386,6 +387,9 @@ def run_one(
         "gamma": config.gamma,
         "m_win": config.m_win,
         "rho": config.rho,
+        "hc_h": getattr(config, "hc_h", 1.0),
+        "hc_delay": getattr(config, "hc_delay", 0),
+        "trend_conf_tau": getattr(config, "trend_conf_tau", getattr(config, "dead_zone_tau", 0.25)),
         "bias_correct_ema": config.bias_correct_ema,
         "relative_trend": config.relative_trend,
         "dead_zone_tau": config.dead_zone_tau,

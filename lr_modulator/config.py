@@ -99,10 +99,10 @@ class ExperimentConfig:
         default_factory=lambda: [
             "cosine",
             "random_cosine",
-            "ours_no_ema_cosine",
-            "ours_no_kernel_cosine",
+            "ours_no_hc_cosine",
+            "ours_no_noise_norm_cosine",
+            "ours_no_gate_cosine",
             "ours_no_clip_cosine",
-            "ours_deadzone_cosine",
             "ours_cosine",
         ]
     )
@@ -125,26 +125,33 @@ class ExperimentConfig:
     step_size_epochs: int = 20
     step_gamma: float = 0.1
 
-    # EMA-loss modulator hyperparameters
+    # Delayed weighted h-Hartley--cosine loss-feedback hyperparameters.
+    # alpha is kept for backward-compatible hyperparameter sweeps, but the proposed
+    # method no longer uses EMA as its main filter.
     alpha: float = 0.95
     c_phi: float = 1.0
     m_win: int = 3
     rho: float = 0.8
     gamma: float = 0.10
+    hc_h: float = 1.0
+    hc_delay: int = 0  # 0 means use the adaptedness-safe default D=M+1
 
-    # Improved controller options.
-    bias_correct_ema: bool = True
-    relative_trend: bool = True
-    dead_zone_tau: float = 0.0
-    variance_normalize: bool = False
+    # Noise-normalized trend-confidence controller options.
+    bias_correct_ema: bool = True  # legacy field, retained for compatibility
+    relative_trend: bool = False
+    trend_conf_tau: float = 0.25
+    dead_zone_tau: float = 0.25  # legacy CLI alias for trend_conf_tau
+    variance_normalize: bool = True
     var_alpha: float = 0.95
     eps_trend: float = 1e-8
     normalize_raw: bool = False
 
-    # Ablation switches.  These can also be activated through method names:
-    # ours_no_ema_cosine, ours_no_kernel_cosine, ours_no_clip_cosine.
-    use_ema: bool = True
+    # Ablation switches. These can also be activated through method names:
+    # ours_no_hc_cosine, ours_no_noise_norm_cosine, ours_no_gate_cosine, ours_no_clip_cosine.
+    use_phi: bool = True
+    use_ema: bool = True  # legacy field
     use_kernel: bool = True
+    use_hc_convolution: bool = True
     use_clipping: bool = True
     emergency_delta_floor: float = -0.95  # keeps LR positive if clipping ablated
     emergency_delta_ceiling: float = 5.0

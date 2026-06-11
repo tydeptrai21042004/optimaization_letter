@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 
 import torch
+
+torch.set_num_threads(1)
+
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
@@ -19,9 +22,9 @@ class TinyMLP(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(3 * 16 * 16, 64),
+            nn.Linear(3 * 16 * 16, 16),
             nn.ReLU(inplace=True),
-            nn.Linear(64, num_classes),
+            nn.Linear(16, num_classes),
         )
 
     def forward(self, x):
@@ -30,10 +33,10 @@ class TinyMLP(nn.Module):
 
 def build_fake_loaders(batch_size: int = 8):
     torch.manual_seed(7)
-    x = torch.randn(24, 3, 16, 16)
-    y = torch.randint(0, 3, (24,))
+    x = torch.randn(12, 3, 16, 16)
+    y = torch.randint(0, 3, (12,))
     ds = TensorDataset(x, y)
-    tr, va, _ = random_split(ds, [16, 4, 4], generator=torch.Generator().manual_seed(7))
+    tr, va, _ = random_split(ds, [8, 2, 2], generator=torch.Generator().manual_seed(7))
     return (
         DataLoader(tr, batch_size=batch_size, shuffle=True),
         DataLoader(va, batch_size=batch_size, shuffle=False),

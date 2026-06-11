@@ -1,0 +1,38 @@
+{
+  "num_seeds": 200,
+  "m_win": 3,
+  "hc_delay": 4,
+  "trend_conf_tau": 0.15,
+  "old_ema_direction_accuracy_all_responses": {
+    "mean": 0.723816067653277,
+    "std": 0.022166636635653835
+  },
+  "new_hc_direction_precision_when_active": {
+    "mean": 0.8216112874796879,
+    "std": 0.05009532402883483
+  },
+  "new_hc_nonflat_coverage": {
+    "mean": 0.153446088794926,
+    "std": 0.01984322229809552
+  },
+  "old_ema_false_active_rate_flat": {
+    "mean": 1.0,
+    "std": 0.0
+  },
+  "new_hc_false_active_rate_flat": {
+    "mean": 0.11859375,
+    "std": 0.03876064625414294
+  },
+  "old_ema_mean_abs_signal": {
+    "mean": 0.0013609045250487146,
+    "std": 6.017202169840683e-05
+  },
+  "new_hc_mean_abs_signal_gated": {
+    "mean": 0.02928568477382812,
+    "std": 0.004049843477065322
+  },
+  "new_hc_active_rate_all_valid_steps": {
+    "mean": 0.1475659050966608,
+    "std": 0.01871027851784306
+  }
+}

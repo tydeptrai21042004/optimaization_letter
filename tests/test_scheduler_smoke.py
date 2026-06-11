@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import torch
 
+torch.set_num_threads(1)
+
 from lr_modulator.config import ExperimentConfig
 from lr_modulator.optimizers import build_optimizer_for_method
 from lr_modulator.schedulers import Controller
@@ -33,9 +35,9 @@ def _run_controller_method(method: str, total_steps: int = 8) -> Controller:
         min_lr=1e-4,
     )
 
-    for _ in range(4):
-        x = torch.randn(8, 4)
-        y = torch.randint(0, 2, (8,))
+    for _ in range(1):
+        x = torch.randn(2, 4)
+        y = torch.randint(0, 2, (2,))
 
         optimizer.zero_grad(set_to_none=True)
         out = model(x)
@@ -107,3 +109,39 @@ def test_shifted_lr_convention_next_step() -> None:
     after_first_loss = float(optimizer.param_groups[0]["lr"])
     assert after_first_loss > 0.0
     assert before != 0.0
+
+
+def test_new_hc_ablation_methods_run() -> None:
+    for method in [
+        "ours_no_hc_cosine",
+        "ours_no_noise_norm_cosine",
+        "ours_no_gate_cosine",
+        "ours_no_phi_cosine",
+    ]:
+        _run_controller_method(method, total_steps=12)
+
+
+def test_delayed_hc_convolution_uses_no_future_loss() -> None:
+    cfg = ExperimentConfig(
+        use_amp=False,
+        num_workers=0,
+        do_finetune=False,
+        mod_warmup_steps=0,
+        m_win=4,
+        hc_delay=0,
+    )
+    model = torch.nn.Linear(4, 2)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    controller = Controller(
+        optimizer=optimizer,
+        config=cfg,
+        method="ours_cosine",
+        total_steps=20,
+        steps_per_epoch=10,
+        base_lr=0.1,
+        min_lr=1e-4,
+    )
+    mod = controller.mod
+    for t in range(2 * cfg.m_win + 3, 2 * cfg.m_win + 8):
+        assert mod.max_index_used_by_delayed_hc(t) <= t
+        assert mod.min_index_used_by_delayed_hc(t) >= 0

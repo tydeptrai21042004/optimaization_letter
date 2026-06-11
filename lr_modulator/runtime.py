@@ -27,9 +27,14 @@ SUPPORTED_METHODS = {
     "ours_cosine",
     "ours_onecycle",
     "ours_warmup_cosine",
+    "ours_no_hc_cosine",
+    "ours_no_noise_norm_cosine",
+    "ours_no_gate_cosine",
+    "ours_no_phi_cosine",
+    "ours_no_clip_cosine",
+    # Backward-compatible aliases from the previous EMA version.
     "ours_no_ema_cosine",
     "ours_no_kernel_cosine",
-    "ours_no_clip_cosine",
     "ours_deadzone_cosine",
 }
 
