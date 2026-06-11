@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from .config import ExperimentConfig
-from .data import build_loaders, recommended_input_size
+from .data import build_loaders, recommended_input_size, task_type_for_dataset
 from .engine import fit
 from .io_utils import (
     batch_history_path,
@@ -88,12 +88,13 @@ def methods_for_task(config: ExperimentConfig, task: str, dataset: str) -> List[
         if dataset == "cifar10" and config.extra_baselines_cifar10:
             methods.extend(config.extra_baselines_cifar10)
         return _uniq_keep_order(methods)
-
     if task == "finetune":
         return _uniq_keep_order(list(config.finetune_methods))
-
-    raise ValueError(f"Unknown task: {task}")
-
+    if task == "regression":
+        return _uniq_keep_order(list(config.regression_methods))
+    if task == "segmentation":
+        return _uniq_keep_order(list(config.segmentation_methods))
+    raise ValueError(f"Unknown task: {task}. Use scratch, finetune, regression, or segmentation")
 
 def _paired_stats(values_a: List[float], values_b: List[float]) -> Tuple[float, float]:
     """Return (mean_diff, approximate paired t-test p-value).
@@ -141,14 +142,9 @@ def summarize_replicates(summaries: Sequence[Dict], out_path: Optional[str] = No
 
     rows: List[Dict] = []
     metrics = [
-        "best_val_acc",
-        "test_acc",
-        "test_loss",
-        "time_sec",
-        "clip_rate",
-        "emergency_clip_rate",
-        "delta_mean_abs_final",
-        "beta_eff_mean",
+        "best_val_score", "test_score", "best_val_acc", "test_acc",
+        "best_val_rmse", "test_rmse", "best_val_pixel_accuracy", "test_pixel_accuracy",
+        "test_loss", "time_sec", "clip_rate", "emergency_clip_rate", "delta_mean_abs_final", "beta_eff_mean",
     ]
     for key, items in grouped.items():
         (
@@ -203,7 +199,7 @@ def summarize_replicates(summaries: Sequence[Dict], out_path: Optional[str] = No
 def paired_method_tests(
     summaries: Sequence[Dict],
     comparisons: Optional[Sequence[Tuple[str, str]]] = None,
-    metric: str = "test_acc",
+    metric: str = "test_score",
     out_path: Optional[str] = None,
 ) -> List[Dict]:
     """Paired seed tests for selected method comparisons.
@@ -281,6 +277,7 @@ def run_one(
     batch_size: int,
     base_lr: float,
     pretrained: bool,
+    task_name: Optional[str] = None,
 ) -> Optional[Dict]:
     label = make_label(
         dataset=dataset,
@@ -297,7 +294,10 @@ def run_one(
         relative_trend=config.relative_trend,
     )
 
-    task_tag = "finetune" if pretrained else "scratch"
+    inferred_task_type = task_type_for_dataset(dataset)
+    override_task_type = getattr(config, "task_type_override", "auto")
+    task_type = inferred_task_type if override_task_type in {None, "", "auto"} else str(override_task_type)
+    task_tag = task_name or ("finetune" if pretrained else "scratch")
     lr_tag = f"{base_lr:.8g}".replace(".", "p")
     label = f"{label}_{task_tag}_ep{epochs}_bs{batch_size}_lr{lr_tag}"
     label_suffix = getattr(config, "label_suffix", "")
@@ -319,7 +319,7 @@ def run_one(
     set_seed(seed, config.deterministic)
 
     input_size = recommended_input_size(model_name, dataset, pretrained)
-    tr_loader, va_loader, te_loader, num_classes = build_loaders(
+    tr_loader, va_loader, te_loader, num_outputs, dataset_task_type = build_loaders(
         config=config,
         device=device,
         dataset=dataset,
@@ -327,8 +327,10 @@ def run_one(
         batch_size=batch_size,
         seed=seed,
     )
+    if override_task_type in {None, "", "auto"}:
+        task_type = dataset_task_type
 
-    model = build_model(model_name, num_classes, pretrained, input_size).to(device)
+    model = build_model(model_name, num_outputs, pretrained, input_size, task_type=task_type).to(device)
 
     optimizer, optimizer_impl = build_optimizer_for_method(
         method=method,
@@ -359,6 +361,7 @@ def run_one(
         device=device,
         config=config,
         epochs=epochs,
+        task_type=task_type,
     )
     elapsed = time.time() - t0
 
@@ -374,6 +377,8 @@ def run_one(
         "base_lr": base_lr,
         "pretrained": pretrained,
         "task": task_tag,
+        "task_type": task_type,
+        "num_outputs": num_outputs,
         "input_size": input_size,
         "deterministic": config.deterministic,
         "num_workers": config.num_workers,
@@ -477,8 +482,18 @@ def run_method_suite(
         epochs = config.finetune_epochs if epochs is None else epochs
         batch_size = config.finetune_batch if batch_size is None else batch_size
         base_lr = config.lr_finetune if base_lr is None else base_lr
+    elif task == "regression":
+        pretrained = False
+        epochs = config.regression_epochs if epochs is None else epochs
+        batch_size = config.regression_batch if batch_size is None else batch_size
+        base_lr = config.lr_regression if base_lr is None else base_lr
+    elif task == "segmentation":
+        pretrained = False
+        epochs = config.segmentation_epochs if epochs is None else epochs
+        batch_size = config.segmentation_batch if batch_size is None else batch_size
+        base_lr = config.lr_segmentation if base_lr is None else base_lr
     else:
-        raise ValueError("task must be either 'scratch' or 'finetune'")
+        raise ValueError("task must be scratch, finetune, regression, or segmentation")
 
     if seeds is None:
         seeds = config.seeds
@@ -516,6 +531,7 @@ def run_method_suite(
                 batch_size,
                 base_lr,
                 pretrained,
+                task,
             )
             if config.should_stop():
                 break
@@ -580,8 +596,18 @@ def run_hparam_sweep(
         epochs = config.finetune_epochs if epochs is None else epochs
         batch_size = config.finetune_batch if batch_size is None else batch_size
         base_lr = config.lr_finetune if base_lr is None else base_lr
+    elif task == "regression":
+        pretrained = False
+        epochs = config.regression_epochs if epochs is None else epochs
+        batch_size = config.regression_batch if batch_size is None else batch_size
+        base_lr = config.lr_regression if base_lr is None else base_lr
+    elif task == "segmentation":
+        pretrained = False
+        epochs = config.segmentation_epochs if epochs is None else epochs
+        batch_size = config.segmentation_batch if batch_size is None else batch_size
+        base_lr = config.lr_segmentation if base_lr is None else base_lr
     else:
-        raise ValueError("task must be either 'scratch' or 'finetune'")
+        raise ValueError("task must be scratch, finetune, regression, or segmentation")
 
     if seeds is None:
         seeds = config.seeds
@@ -659,6 +685,7 @@ def run_hparam_sweep(
                                 batch_size=int(batch_size),
                                 base_lr=float(base_lr),
                                 pretrained=pretrained,
+                                task_name=task,
                             )
                             if summary is not None:
                                 summary["hparam_name"] = hparam_name
@@ -729,6 +756,7 @@ def run_all(config: ExperimentConfig, device: torch.device) -> List[Dict]:
                         config.scratch_batch,
                         config.lr_scratch,
                         False,
+                        "scratch",
                     )
                     if config.should_stop():
                         break
@@ -768,6 +796,7 @@ def run_all(config: ExperimentConfig, device: torch.device) -> List[Dict]:
                             config.finetune_batch,
                             config.lr_finetune,
                             True,
+                            "finetune",
                         )
                         if config.should_stop():
                             break
@@ -777,5 +806,32 @@ def run_all(config: ExperimentConfig, device: torch.device) -> List[Dict]:
                     break
             if config.should_stop():
                 break
+
+
+    if not config.should_stop():
+        for ds in config.regression_datasets:
+            for model_name in config.regression_models:
+                methods = methods_for_task(config, "regression", ds)
+                for method in methods:
+                    for seed in config.seeds:
+                        _print_run_header("regression", ds, model_name, method, seed, config.regression_epochs, config.regression_batch, config.lr_regression, False)
+                        safe_run(all_summaries, config, device, ds, model_name, method, seed, config.regression_epochs, config.regression_batch, config.lr_regression, False, "regression")
+                        if config.should_stop(): break
+                    if config.should_stop(): break
+                if config.should_stop(): break
+            if config.should_stop(): break
+
+    if not config.should_stop():
+        for ds in config.segmentation_datasets:
+            for model_name in config.segmentation_models:
+                methods = methods_for_task(config, "segmentation", ds)
+                for method in methods:
+                    for seed in config.seeds:
+                        _print_run_header("segmentation", ds, model_name, method, seed, config.segmentation_epochs, config.segmentation_batch, config.lr_segmentation, False)
+                        safe_run(all_summaries, config, device, ds, model_name, method, seed, config.segmentation_epochs, config.segmentation_batch, config.lr_segmentation, False, "segmentation")
+                        if config.should_stop(): break
+                    if config.should_stop(): break
+                if config.should_stop(): break
+            if config.should_stop(): break
 
     return all_summaries
