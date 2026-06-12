@@ -220,7 +220,7 @@ class EMALossModulator:
     implemented proposed method is no longer an EMA-only controller.  After batch
     t, the observed loss L_t is mapped to a bounded signal u_t, filtered by a
     delayed weighted h-Hartley--cosine convolution, converted into a backward
-    filtered-loss trend, normalized by local loss-signal noise, gated by a trend
+    filtered-loss trend, normalized by local loss-signal noise, optionally gated by a trend
     confidence threshold, and clipped before modulating the next base LR:
 
         eta_{t+1} = r_{t+1} (1 + delta_t).
@@ -791,9 +791,11 @@ class Controller:
             "ours_cosine",
             "ours_onecycle",
             "ours_warmup_cosine",
+            "ours_plateau",
             "ours_no_hc_cosine",
             "ours_no_noise_norm_cosine",
             "ours_no_gate_cosine",
+            "ours_no_gate_plateau",
             "ours_no_phi_cosine",
             "ours_no_clip_cosine",
             # Backward-compatible aliases from the old EMA manuscript version.
@@ -806,9 +808,11 @@ class Controller:
                 "ours_cosine": "cosine",
                 "ours_onecycle": "onecycle",
                 "ours_warmup_cosine": "warmup_cosine",
+                "ours_plateau": "plateau",
                 "ours_no_hc_cosine": "cosine",
                 "ours_no_noise_norm_cosine": "cosine",
                 "ours_no_gate_cosine": "cosine",
+                "ours_no_gate_plateau": "plateau",
                 "ours_no_phi_cosine": "cosine",
                 "ours_no_clip_cosine": "cosine",
                 "ours_no_ema_cosine": "cosine",
@@ -819,6 +823,8 @@ class Controller:
                 "ours_no_hc_cosine": "no_hc",
                 "ours_no_noise_norm_cosine": "no_noise_norm",
                 "ours_no_gate_cosine": "no_gate",
+                "ours_plateau": "no_gate",
+                "ours_no_gate_plateau": "no_gate",
                 "ours_no_phi_cosine": "no_phi",
                 "ours_no_clip_cosine": "no_clip",
                 # Old aliases.
@@ -841,12 +847,13 @@ class Controller:
             self.last_delta = 0.0
             self.last_raw = 0.0
 
-        elif method in {"random_cosine", "random_onecycle", "random_warmup_cosine"}:
+        elif method in {"random_cosine", "random_onecycle", "random_warmup_cosine", "random_plateau"}:
             self.kind = "random"
             base_mode = {
                 "random_cosine": "cosine",
                 "random_onecycle": "onecycle",
                 "random_warmup_cosine": "warmup_cosine",
+                "random_plateau": "plateau",
             }[method]
             self.random = RandomBoundedModulator(
                 optimizer=optimizer,

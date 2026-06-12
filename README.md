@@ -21,7 +21,7 @@ The delay is essential. The weighted `h`-Hartley--cosine convolution is two-side
 
 | Method name | Meaning |
 |---|---|
-| `ours_cosine` | Proposed HC-convolutional modulator on top of cosine |
+| `ours_cosine` | Legacy HC-convolutional modulator on top of cosine |
 | `ours_onecycle` | Proposed HC-convolutional modulator on top of one-cycle |
 | `ours_warmup_cosine` | Proposed HC-convolutional modulator on top of warmup-cosine |
 | `ours_no_hc_cosine` | Ablation without Hartley--cosine convolution |

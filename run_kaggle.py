@@ -109,7 +109,7 @@ def build_parser():
         default=None,
         help=(
             "Example: --methods cosine random_cosine l4_sgd hyper_sgd "
-            "dadapt_sgd prodigy ours_cosine ours_onecycle ours_warmup_cosine"
+            "dadapt_sgd prodigy ours_plateau ours_cosine ours_onecycle ours_warmup_cosine"
         ),
     )
 
@@ -122,6 +122,16 @@ def build_parser():
     p.add_argument("--dead-zone-tau", type=float, default=None, help="Legacy alias for --trend-conf-tau")
     p.add_argument("--trend-conf-tau", type=float, default=None)
     p.add_argument("--hc-h", type=float, default=None)
+
+    p.add_argument("--mod-warmup-steps", type=int, default=None)
+    p.add_argument("--sched-warmup-steps", type=int, default=None)
+    p.add_argument("--target-mean-abs-delta", type=float, default=None)
+    p.add_argument("--beta-cap", type=float, default=None)
+    p.add_argument("--random-delta-gamma", type=float, default=None)
+    p.add_argument("--plateau-factor", type=float, default=None)
+    p.add_argument("--plateau-patience", type=int, default=None)
+    p.add_argument("--plateau-threshold", type=float, default=None)
+    p.add_argument("--plateau-cooldown", type=int, default=None)
     p.add_argument("--variance-normalize", action="store_true")
     p.add_argument("--absolute-trend", action="store_true")
     p.add_argument(
@@ -156,6 +166,25 @@ def apply_cli_overrides(config: ExperimentConfig, args) -> None:
         config.dead_zone_tau = args.trend_conf_tau
     if args.hc_h is not None:
         config.hc_h = args.hc_h
+
+    if args.mod_warmup_steps is not None:
+        config.mod_warmup_steps = args.mod_warmup_steps
+    if args.sched_warmup_steps is not None:
+        config.sched_warmup_steps = args.sched_warmup_steps
+    if args.target_mean_abs_delta is not None:
+        config.target_mean_abs_delta = args.target_mean_abs_delta
+    if args.beta_cap is not None:
+        config.beta_cap = args.beta_cap
+    if args.random_delta_gamma is not None:
+        config.random_delta_gamma = args.random_delta_gamma
+    if args.plateau_factor is not None:
+        config.plateau_factor = args.plateau_factor
+    if args.plateau_patience is not None:
+        config.plateau_patience = args.plateau_patience
+    if args.plateau_threshold is not None:
+        config.plateau_threshold = args.plateau_threshold
+    if args.plateau_cooldown is not None:
+        config.plateau_cooldown = args.plateau_cooldown
     if args.variance_normalize:
         config.variance_normalize = True
     if args.absolute_trend:

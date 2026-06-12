@@ -160,6 +160,10 @@ def main() -> None:
 
     methods = [
         "constant",
+        "plateau",
+        "random_plateau",
+        "ours_plateau",
+        "ours_no_gate_plateau",
         "random_cosine",
         "ours_cosine",
     ]
@@ -170,8 +174,8 @@ def main() -> None:
         result = run_one_method(method, config, device, train_loader, val_loader, task_type="classification")
         results.append(result)
 
-    print("[smoke] running regression ours_cosine", flush=True)
-    results.append(run_one_method("ours_cosine", config, device, reg_train_loader, reg_val_loader, task_type="regression"))
+    print("[smoke] running regression ours_plateau", flush=True)
+    results.append(run_one_method("ours_plateau", config, device, reg_train_loader, reg_val_loader, task_type="regression"))
 
     payload = {"num_methods_tested": len(results), "methods": results}
 

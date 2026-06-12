@@ -133,6 +133,7 @@ def test_all_default_classification_baselines_and_proposed_methods_run_one_epoch
         "random_cosine",
         "random_onecycle",
         "random_warmup_cosine",
+        "random_plateau",
         "l4_sgd",
         "hyper_sgd",
         "dadapt_sgd",
@@ -141,9 +142,11 @@ def test_all_default_classification_baselines_and_proposed_methods_run_one_epoch
         "ours_cosine",
         "ours_onecycle",
         "ours_warmup_cosine",
+        "ours_plateau",
         "ours_no_hc_cosine",
         "ours_no_noise_norm_cosine",
         "ours_no_gate_cosine",
+        "ours_no_gate_plateau",
         "ours_no_phi_cosine",
         "ours_no_clip_cosine",
     ]
@@ -155,8 +158,8 @@ def test_all_default_classification_baselines_and_proposed_methods_run_one_epoch
 
 def test_regression_and_segmentation_methods_run_one_epoch() -> None:
     for task_type, methods in {
-        "regression": ["constant", "cosine", "random_cosine", "l4_sgd", "hyper_sgd", "ours_cosine"],
-        "segmentation": ["constant", "cosine", "random_cosine", "ours_cosine"],
+        "regression": ["constant", "cosine", "plateau", "random_cosine", "random_plateau", "l4_sgd", "hyper_sgd", "ours_cosine", "ours_plateau"],
+        "segmentation": ["constant", "cosine", "plateau", "random_cosine", "random_plateau", "ours_cosine", "ours_plateau"],
     }.items():
         for method in methods:
             payload, hist = _run_one_epoch(method, task_type)

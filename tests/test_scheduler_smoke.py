@@ -62,6 +62,11 @@ def test_random_bounded_modulator_runs() -> None:
     assert abs(ctrl.last_delta) <= 0.1000001
 
 
+def test_random_plateau_modulator_runs() -> None:
+    ctrl = _run_controller_method("random_plateau")
+    assert abs(ctrl.last_delta) <= 0.0500001
+
+
 def test_l4_sgd_runs_and_sets_positive_lr() -> None:
     ctrl = _run_controller_method("l4_sgd")
     assert ctrl.stats()["l4_updates"] > 0
@@ -117,6 +122,8 @@ def test_new_hc_ablation_methods_run() -> None:
         "ours_no_noise_norm_cosine",
         "ours_no_gate_cosine",
         "ours_no_phi_cosine",
+        "ours_plateau",
+        "ours_no_gate_plateau",
     ]:
         _run_controller_method(method, total_steps=12)
 

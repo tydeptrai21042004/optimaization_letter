@@ -204,10 +204,14 @@ def paired_method_tests(
 ) -> List[Dict]:
     """Paired seed tests for selected method comparisons.
 
-    By default tests the proposed EMA variants against their base/random rivals.
+    By default tests the proposed HC variants against their base/random rivals.
     """
     if comparisons is None:
         comparisons = [
+            ("ours_plateau", "plateau"),
+            ("ours_plateau", "random_plateau"),
+            ("ours_no_gate_plateau", "plateau"),
+            ("ours_no_gate_plateau", "random_plateau"),
             ("ours_cosine", "cosine"),
             ("ours_cosine", "random_cosine"),
             ("ours_onecycle", "onecycle"),
@@ -611,7 +615,7 @@ def run_hparam_sweep(
 
     if seeds is None:
         seeds = config.seeds
-    methods = list(methods) if methods is not None else ["ours_cosine"]
+    methods = list(methods) if methods is not None else ["ours_plateau"]
 
     sweep_grid: List[Tuple[str, Sequence]] = [
         ("alpha", config.ablation_alphas),

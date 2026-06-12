@@ -60,6 +60,7 @@ class ExperimentConfig:
             # New direct controls / rivals
             "random_cosine",
             "random_onecycle",
+            "random_plateau",
             "l4_sgd",
             "hyper_sgd",
             "dadapt_sgd",
@@ -69,11 +70,12 @@ class ExperimentConfig:
             "ours_cosine",
             "ours_onecycle",
             "ours_warmup_cosine",
+            "ours_plateau",
         ]
     )
     extra_baselines_cifar10: List[str] = field(default_factory=lambda: ["constant", "step"])
-    regression_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "random_cosine", "l4_sgd", "hyper_sgd", "ours_cosine"])
-    segmentation_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "random_cosine", "ours_cosine"])
+    regression_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "plateau", "random_cosine", "random_plateau", "l4_sgd", "hyper_sgd", "ours_cosine", "ours_plateau"])
+    segmentation_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "plateau", "random_cosine", "random_plateau", "ours_cosine", "ours_plateau"])
 
     do_finetune: bool = True
     finetune_datasets: List[str] = field(default_factory=lambda: ["oxfordiiitpet"])
@@ -89,6 +91,7 @@ class ExperimentConfig:
             "plateau",
             "random_cosine",
             "random_onecycle",
+            "random_plateau",
             "l4_sgd",
             "hyper_sgd",
             "dadapt_sgd",
@@ -97,12 +100,18 @@ class ExperimentConfig:
             "ours_cosine",
             "ours_onecycle",
             "ours_warmup_cosine",
+            "ours_plateau",
         ]
     )
 
     # Optional ablation method list for focused suite runs.
     ablation_methods: List[str] = field(
         default_factory=lambda: [
+            "plateau",
+            "random_plateau",
+            "ours_no_gate_plateau",
+            "ours_plateau",
+            # Legacy cosine-focused ablations remain available for compatibility.
             "cosine",
             "random_cosine",
             "ours_no_hc_cosine",
@@ -139,14 +148,19 @@ class ExperimentConfig:
     step_size_epochs: int = 20
     step_gamma: float = 0.1
 
+
+    # Paper-facing proposal: delayed HC micro-modulation on top of Plateau,
+    # with the trend-confidence gate disabled.  The explicit implementation name
+    # is `ours_no_gate_plateau`; `ours_plateau` is the cleaner manuscript alias.
+
     # Delayed weighted h-Hartley--cosine loss-feedback hyperparameters.
     # alpha is kept for backward-compatible hyperparameter sweeps, but the proposed
     # method no longer uses EMA as its main filter.
     alpha: float = 0.95
     c_phi: float = 1.0
-    m_win: int = 3
+    m_win: int = 1
     rho: float = 0.8
-    gamma: float = 0.10
+    gamma: float = 0.05
     hc_h: float = 1.0
     hc_delay: int = 0  # 0 means use the adaptedness-safe default D=M+1
 
@@ -170,13 +184,13 @@ class ExperimentConfig:
     emergency_delta_floor: float = -0.95  # keeps LR positive if clipping ablated
     emergency_delta_ceiling: float = 5.0
 
-    use_auto_beta: bool = True
-    beta_fixed: float = 0.08
-    target_mean_abs_delta: float = 0.02
-    beta_cap: float = 3.0
+    use_auto_beta: bool = False
+    beta_fixed: float = 0.01
+    target_mean_abs_delta: float = 0.01
+    beta_cap: float = 1.0
 
     # Random bounded modulation rival
-    random_delta_gamma: float = 0.10
+    random_delta_gamma: float = 0.05
 
     # L4 rival.  Uses a practical loss-based step-size rule before optimizer.step().
     l4_alpha: float = 0.15
@@ -204,7 +218,7 @@ class ExperimentConfig:
 
     # Separate warmups
     # For the EMA modulator activation
-    mod_warmup_steps: int = 100
+    mod_warmup_steps: int = 0
 
     # For the warmup+cosine base schedule
     sched_warmup_steps: int = 500
