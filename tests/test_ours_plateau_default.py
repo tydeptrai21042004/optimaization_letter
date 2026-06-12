@@ -39,8 +39,26 @@ def _linear_optimizer_and_controller(method: str, total_steps: int = 12):
 
 
 def test_default_proposal_methods_are_registered() -> None:
-    methods = validate_methods(["plateau", "random_plateau", "ours_plateau", "ours_no_gate_plateau"])
-    assert methods == ["plateau", "random_plateau", "ours_plateau", "ours_no_gate_plateau"]
+    methods = validate_methods([
+        "plateau",
+        "random_plateau",
+        "ours_plateau",
+        "ours_no_gate_plateau",
+        "ours_with_gate_plateau",
+        "ours_no_hc_plateau",
+        "ours_no_noise_norm_plateau",
+        "ours_no_clip_plateau",
+    ])
+    assert methods == [
+        "plateau",
+        "random_plateau",
+        "ours_plateau",
+        "ours_no_gate_plateau",
+        "ours_with_gate_plateau",
+        "ours_no_hc_plateau",
+        "ours_no_noise_norm_plateau",
+        "ours_no_clip_plateau",
+    ]
 
 
 def test_ours_plateau_is_no_gate_plateau_alias() -> None:
@@ -102,3 +120,17 @@ def test_random_plateau_runs_batches_and_epoch_end_with_positive_lr() -> None:
     controller.on_epoch_end(1.0)
     assert controller.last_lr > 0.0
     assert abs(controller.last_delta) <= 0.05 + 1e-12
+
+
+def test_ours_plateau_ablation_variants_use_plateau_base() -> None:
+    expected = {
+        "ours_with_gate_plateau": "full",
+        "ours_no_hc_plateau": "no_hc",
+        "ours_no_noise_norm_plateau": "no_noise_norm",
+        "ours_no_clip_plateau": "no_clip",
+    }
+    for method, variant in expected.items():
+        _, _, _, controller = _linear_optimizer_and_controller(method)
+        assert controller.kind == "mod"
+        assert controller.mod.base.mode == "plateau"
+        assert controller.mod.variant == variant

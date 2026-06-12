@@ -60,6 +60,7 @@ class ExperimentConfig:
             # New direct controls / rivals
             "random_cosine",
             "random_onecycle",
+            "random_warmup_cosine",
             "random_plateau",
             "l4_sgd",
             "hyper_sgd",
@@ -74,8 +75,8 @@ class ExperimentConfig:
         ]
     )
     extra_baselines_cifar10: List[str] = field(default_factory=lambda: ["constant", "step"])
-    regression_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "plateau", "random_cosine", "random_plateau", "l4_sgd", "hyper_sgd", "ours_cosine", "ours_plateau"])
-    segmentation_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "plateau", "random_cosine", "random_plateau", "ours_cosine", "ours_plateau"])
+    regression_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "warmup_cosine", "plateau", "random_cosine", "random_warmup_cosine", "random_plateau", "l4_sgd", "hyper_sgd", "ours_cosine", "ours_warmup_cosine", "ours_plateau"])
+    segmentation_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "warmup_cosine", "plateau", "random_cosine", "random_warmup_cosine", "random_plateau", "ours_cosine", "ours_warmup_cosine", "ours_plateau"])
 
     do_finetune: bool = True
     finetune_datasets: List[str] = field(default_factory=lambda: ["oxfordiiitpet"])
@@ -91,6 +92,7 @@ class ExperimentConfig:
             "plateau",
             "random_cosine",
             "random_onecycle",
+            "random_warmup_cosine",
             "random_plateau",
             "l4_sgd",
             "hyper_sgd",
@@ -109,6 +111,10 @@ class ExperimentConfig:
         default_factory=lambda: [
             "plateau",
             "random_plateau",
+            "ours_with_gate_plateau",
+            "ours_no_hc_plateau",
+            "ours_no_noise_norm_plateau",
+            "ours_no_clip_plateau",
             "ours_no_gate_plateau",
             "ours_plateau",
             # Legacy cosine-focused ablations remain available for compatibility.

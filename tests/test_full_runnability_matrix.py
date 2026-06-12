@@ -147,6 +147,10 @@ def test_all_default_classification_baselines_and_proposed_methods_run_one_epoch
         "ours_no_noise_norm_cosine",
         "ours_no_gate_cosine",
         "ours_no_gate_plateau",
+        "ours_no_clip_plateau",
+        "ours_no_noise_norm_plateau",
+        "ours_no_hc_plateau",
+        "ours_with_gate_plateau",
         "ours_no_phi_cosine",
         "ours_no_clip_cosine",
     ]
