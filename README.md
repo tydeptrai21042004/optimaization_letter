@@ -615,3 +615,7 @@ Current validation result on this patched repo:
 Smoke test passed.
 synthetic_compare_old_new.py completed and printed the summary JSON.
 ```
+
+## EMA-GAC extension
+
+The corrected repository includes EMA-GAC methods (`ema_gac_warmup_cosine`, `ema_gac_cosine`, `ema_gac_onecycle`, and `ema_gac_plateau`). See [`README_EMA_GAC.md`](README_EMA_GAC.md) for the equations, parameters, tests, and reproducible commands.

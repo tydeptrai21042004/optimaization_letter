@@ -534,6 +534,240 @@ class EMALossModulator:
         }
 
 
+class EMAGACModulator:
+    """EMA trend with Gradient-Alignment Confirmation (EMA-GAC).
+
+    Causal next-step rule:
+        1. after backward at batch t, estimate cosine alignment a_t between g_t and g_{t-1};
+        2. after observing L_t, update fast/slow EMAs and a volatility-normalized trend z_t;
+        3. confirm the trend with smoothed alignment and produce bounded asymmetric delta_t;
+        4. apply eta_{t+1} = r_{t+1} (1 + delta_t).
+
+    The controller never changes the learning rate used for the current gradient update.
+    """
+
+    def __init__(
+        self,
+        optimizer: Optimizer,
+        config: ExperimentConfig,
+        base_mode: str,
+        total_steps: int,
+        steps_per_epoch: int,
+        base_lr: float,
+        min_lr: float,
+    ) -> None:
+        self.optimizer = optimizer
+        self.config = config
+        self.total_steps = max(1, int(total_steps))
+        self.base = BatchBaseSchedule(
+            optimizer, config, base_mode, total_steps, steps_per_epoch, base_lr, min_lr
+        )
+        self.step_idx = 0
+        self.ema_fast: Optional[float] = None
+        self.ema_slow: Optional[float] = None
+        self.trend_mean = 0.0
+        self.trend_var = 0.0
+        self.alignment_ema = 0.0
+        self.last_alignment = 0.0
+        self.prev_grads: List[torch.Tensor] = []
+
+        self.total_mod_steps = 0
+        self.active_mod_steps = 0
+        self.confirmed_steps = 0
+        self.clip_count = 0
+        self.positive_steps = 0
+        self.negative_steps = 0
+        self.delta_abs_sum = 0.0
+        self.alignment_abs_sum = 0.0
+        self.trend_abs_sum = 0.0
+
+        self.last_base_lr = float(self.base.current_lr)
+        self.last_mod_lr = float(self.base.current_lr)
+        self.last_delta = 0.0
+        self.last_raw = 0.0
+        self.last_score = 0.0
+        self.last_beta_eff = 0.0
+        self.last_ema = 0.0
+        self.last_u = 0.0
+        self.last_clipped = False
+        self.last_emergency_clipped = False
+        self.last_phase_envelope = 0.0
+        self.last_confirmed_signal = 0.0
+
+    def _set_lr(self, lr: float) -> None:
+        for pg in self.optimizer.param_groups:
+            pg["lr"] = float(lr)
+
+    def _selected_gradients(self) -> List[torch.Tensor]:
+        stride = max(1, _cfg_int(self.config, "ema_gac_gradient_sample_stride", default=1))
+        max_tensors = max(0, _cfg_int(self.config, "ema_gac_max_gradient_tensors", default=0))
+        selected: List[torch.Tensor] = []
+        tensor_idx = 0
+        for group in self.optimizer.param_groups:
+            for parameter in group["params"]:
+                if parameter.grad is None:
+                    continue
+                if tensor_idx % stride == 0:
+                    selected.append(parameter.grad.detach().clone())
+                    if max_tensors and len(selected) >= max_tensors:
+                        return selected
+                tensor_idx += 1
+        return selected
+
+    @staticmethod
+    def _cosine_alignment(current: List[torch.Tensor], previous: List[torch.Tensor], eps: float) -> float:
+        if not current or not previous or len(current) != len(previous):
+            return 0.0
+        dot = 0.0
+        norm_current = 0.0
+        norm_previous = 0.0
+        for now, before in zip(current, previous):
+            if now.shape != before.shape:
+                return 0.0
+            now_f = now.float()
+            before_f = before.to(device=now.device, dtype=torch.float32)
+            dot += float(torch.sum(now_f * before_f).item())
+            norm_current += float(torch.sum(now_f * now_f).item())
+            norm_previous += float(torch.sum(before_f * before_f).item())
+        denom = math.sqrt(max(norm_current * norm_previous, 0.0)) + eps
+        return float(np.clip(dot / denom, -1.0, 1.0))
+
+    def on_after_backward(self, loss_value: float) -> None:
+        eps = _cfg_float(self.config, "ema_gac_eps", default=1e-8)
+        current = self._selected_gradients()
+        alignment = self._cosine_alignment(current, self.prev_grads, eps)
+        alpha = float(np.clip(_cfg_float(self.config, "ema_gac_alignment_alpha", default=0.90), 0.0, 0.999999))
+        self.alignment_ema = alpha * self.alignment_ema + (1.0 - alpha) * alignment
+        self.last_alignment = float(alignment)
+        self.prev_grads = current
+
+    def _phase_envelope(self, next_step: int) -> float:
+        if not bool(_cfg_get(self.config, "ema_gac_use_phase_envelope", default=True)):
+            return 1.0
+        progress = float(np.clip(next_step / self.total_steps, 0.0, 1.0))
+        start = float(np.clip(_cfg_float(self.config, "ema_gac_phase_start", default=0.05), 0.0, 1.0))
+        end = float(np.clip(_cfg_float(self.config, "ema_gac_phase_end", default=0.90), start + 1e-6, 1.0))
+        if progress <= start or progress >= end:
+            return 0.0
+        local = (progress - start) / (end - start)
+        return float(math.sin(math.pi * local) ** 2)
+
+    def _confirmed_signal(self, trend_score: float) -> float:
+        alignment = float(np.clip(self.alignment_ema, -1.0, 1.0))
+        mode = _cfg_str(self.config, "ema_gac_confirmation_mode", default="strict").lower()
+        if mode == "loss_only":
+            return trend_score
+        if mode == "alignment_only":
+            return alignment
+        if mode == "soft":
+            # Alignment controls confidence while the loss trend controls direction.
+            return math.copysign(math.sqrt(abs(trend_score) * max(alignment, 0.0)), trend_score) if alignment > 0 else 0.0
+        # Strict confirmation: improvement+alignment or deterioration+misalignment.
+        if (trend_score > 0.0 and alignment > 0.0) or (trend_score < 0.0 and alignment < 0.0):
+            return math.copysign(math.sqrt(abs(trend_score * alignment)), trend_score)
+        return 0.0
+
+    def on_batch_end(self, loss_value: float) -> None:
+        loss = float(loss_value)
+        alpha_fast = float(np.clip(_cfg_float(self.config, "ema_gac_alpha_fast", default=0.90), 0.0, 0.999999))
+        alpha_slow = float(np.clip(_cfg_float(self.config, "ema_gac_alpha_slow", default=0.99), 0.0, 0.999999))
+        if alpha_slow <= alpha_fast:
+            raise ValueError("EMA-GAC requires ema_gac_alpha_slow > ema_gac_alpha_fast")
+        vol_alpha = float(np.clip(_cfg_float(self.config, "ema_gac_volatility_alpha", default=0.95), 0.0, 0.999999))
+        eps = _cfg_float(self.config, "ema_gac_eps", default=1e-8)
+
+        if self.ema_fast is None:
+            self.ema_fast = loss
+            self.ema_slow = loss
+            trend = 0.0
+            normalized = 0.0
+        else:
+            self.ema_fast = alpha_fast * self.ema_fast + (1.0 - alpha_fast) * loss
+            self.ema_slow = alpha_slow * self.ema_slow + (1.0 - alpha_slow) * loss
+            trend = (self.ema_slow - self.ema_fast) / (abs(self.ema_slow) + eps)
+            old_mean = self.trend_mean
+            self.trend_mean = vol_alpha * self.trend_mean + (1.0 - vol_alpha) * trend
+            residual = trend - old_mean
+            self.trend_var = vol_alpha * self.trend_var + (1.0 - vol_alpha) * residual * residual
+            normalized = math.tanh(trend / (math.sqrt(max(self.trend_var, 0.0)) + eps))
+
+        self.last_ema = float(self.ema_slow)
+        self.last_u = float(self.ema_fast)
+        self.last_raw = float(trend)
+        self.last_score = float(normalized)
+
+        # Advance first: current feedback controls only the next optimizer update.
+        self.last_base_lr = float(self.base.on_batch_end())
+        envelope = self._phase_envelope(self.step_idx + 1)
+        self.last_phase_envelope = envelope
+
+        dead_zone = max(0.0, _cfg_float(self.config, "ema_gac_dead_zone", default=0.10))
+        score_after_deadzone = math.copysign(max(abs(normalized) - dead_zone, 0.0), normalized)
+        confirmed = self._confirmed_signal(score_after_deadzone)
+        self.last_confirmed_signal = float(confirmed)
+
+        beta_up = max(0.0, _cfg_float(self.config, "ema_gac_beta_up", default=1.0))
+        beta_down = max(0.0, _cfg_float(self.config, "ema_gac_beta_down", default=1.5))
+        gamma_up = float(np.clip(_cfg_float(self.config, "ema_gac_gamma_up", default=0.015), 0.0, 0.95))
+        gamma_down = float(np.clip(_cfg_float(self.config, "ema_gac_gamma_down", default=0.05), 0.0, 0.95))
+
+        if confirmed >= 0.0:
+            delta = envelope * gamma_up * math.tanh(beta_up * confirmed)
+            beta_eff = beta_up
+        else:
+            delta = envelope * gamma_down * math.tanh(beta_down * confirmed)
+            beta_eff = beta_down
+
+        unclipped = delta
+        delta = float(np.clip(delta, -gamma_down, gamma_up))
+        clipped = not math.isclose(delta, unclipped, rel_tol=0.0, abs_tol=1e-15)
+        self.last_delta = delta
+        self.last_beta_eff = float(beta_eff)
+        self.last_clipped = clipped
+        self.last_emergency_clipped = False
+        self.last_mod_lr = float(self.last_base_lr * (1.0 + delta))
+        self._set_lr(self.last_mod_lr)
+
+        self.total_mod_steps += 1
+        active = abs(delta) > 0.0
+        self.active_mod_steps += int(active)
+        self.confirmed_steps += int(abs(confirmed) > 0.0)
+        self.clip_count += int(clipped)
+        self.positive_steps += int(delta > 0.0)
+        self.negative_steps += int(delta < 0.0)
+        self.delta_abs_sum += abs(delta)
+        self.alignment_abs_sum += abs(self.alignment_ema)
+        self.trend_abs_sum += abs(normalized)
+        self.step_idx += 1
+
+    def on_epoch_end(self, metric: Optional[float] = None) -> None:
+        self.last_base_lr = float(self.base.on_epoch_end(metric))
+        self.last_mod_lr = float(self.last_base_lr * (1.0 + self.last_delta))
+        self._set_lr(self.last_mod_lr)
+
+    def stats(self) -> Dict[str, float]:
+        n = max(self.total_mod_steps, 1)
+        return {
+            "clip_rate": float(self.clip_count / n),
+            "active_mod_rate": float(self.active_mod_steps / n),
+            "confirmation_rate": float(self.confirmed_steps / n),
+            "positive_delta_rate": float(self.positive_steps / n),
+            "negative_delta_rate": float(self.negative_steps / n),
+            "delta_mean_abs_final": float(self.delta_abs_sum / n),
+            "alignment_mean_abs": float(self.alignment_abs_sum / n),
+            "trend_score_mean_abs": float(self.trend_abs_sum / n),
+            "last_alignment": float(self.last_alignment),
+            "last_alignment_ema": float(self.alignment_ema),
+            "last_trend": float(self.last_raw),
+            "last_trend_score": float(self.last_score),
+            "last_confirmed_signal": float(self.last_confirmed_signal),
+            "last_phase_envelope": float(self.last_phase_envelope),
+            "ema_fast_final": 0.0 if self.ema_fast is None else float(self.ema_fast),
+            "ema_slow_final": 0.0 if self.ema_slow is None else float(self.ema_slow),
+            "total_mod_steps": float(self.total_mod_steps),
+        }
+
+
 class RandomBoundedModulator:
     """Random clipped perturbation rival.
 
@@ -763,6 +997,11 @@ class Controller:
         self.last_clipped = False
         self.last_emergency_clipped = False
         self.last_grad_norm_sq = 0.0
+        self.last_alignment = 0.0
+        self.last_alignment_ema = 0.0
+        self.last_trend_score = 0.0
+        self.last_confirmed_signal = 0.0
+        self.last_phase_envelope = 0.0
 
         if method in {
             "constant",
@@ -859,6 +1098,27 @@ class Controller:
             self.last_delta = 0.0
             self.last_raw = 0.0
 
+        elif method in {"ema_gac_cosine", "ema_gac_onecycle", "ema_gac_warmup_cosine", "ema_gac_plateau"}:
+            self.kind = "ema_gac"
+            base_mode = {
+                "ema_gac_cosine": "cosine",
+                "ema_gac_onecycle": "onecycle",
+                "ema_gac_warmup_cosine": "warmup_cosine",
+                "ema_gac_plateau": "plateau",
+            }[method]
+            self.ema_gac = EMAGACModulator(
+                optimizer=optimizer,
+                config=config,
+                base_mode=base_mode,
+                total_steps=total_steps,
+                steps_per_epoch=steps_per_epoch,
+                base_lr=base_lr,
+                min_lr=min_lr,
+            )
+            self.last_lr = self.ema_gac.last_mod_lr
+            self.last_delta = 0.0
+            self.last_raw = 0.0
+
         elif method in {"random_cosine", "random_onecycle", "random_warmup_cosine", "random_plateau"}:
             self.kind = "random"
             base_mode = {
@@ -908,6 +1168,11 @@ class Controller:
 
     def _sync_public_state(self) -> None:
         """Synchronize public logging attributes after each controller action."""
+        self.last_alignment = 0.0
+        self.last_alignment_ema = 0.0
+        self.last_trend_score = 0.0
+        self.last_confirmed_signal = 0.0
+        self.last_phase_envelope = 0.0
         if self.kind == "base":
             self.last_base_lr = float(self.base.current_lr)
             self.last_beta_eff = 0.0
@@ -922,6 +1187,18 @@ class Controller:
             self.last_u_signal = float(self.mod.last_u)
             self.last_clipped = bool(self.mod.last_clipped)
             self.last_emergency_clipped = bool(self.mod.last_emergency_clipped)
+        elif self.kind == "ema_gac":
+            self.last_base_lr = float(self.ema_gac.last_base_lr)
+            self.last_beta_eff = float(self.ema_gac.last_beta_eff)
+            self.last_ema_loss = float(self.ema_gac.last_ema)
+            self.last_u_signal = float(self.ema_gac.last_u)
+            self.last_clipped = bool(self.ema_gac.last_clipped)
+            self.last_emergency_clipped = False
+            self.last_alignment = float(self.ema_gac.last_alignment)
+            self.last_alignment_ema = float(self.ema_gac.alignment_ema)
+            self.last_trend_score = float(self.ema_gac.last_score)
+            self.last_confirmed_signal = float(self.ema_gac.last_confirmed_signal)
+            self.last_phase_envelope = float(self.ema_gac.last_phase_envelope)
         elif self.kind == "random":
             self.last_base_lr = float(self.random.last_base_lr)
             self.last_beta_eff = 0.0
@@ -941,7 +1218,12 @@ class Controller:
         self.last_grad_norm_sq = float(value)
 
     def on_after_backward(self, loss_value: float) -> None:
-        if self.kind == "l4":
+        if self.kind == "ema_gac":
+            self.ema_gac.on_after_backward(loss_value)
+            self.last_lr = self.ema_gac.last_mod_lr
+            self.last_delta = self.ema_gac.last_delta
+            self.last_raw = self.ema_gac.last_raw
+        elif self.kind == "l4":
             self.l4.on_after_backward(loss_value)
             self.last_lr = self.l4.last_lr
             self.last_delta = self.l4.last_delta
@@ -965,6 +1247,11 @@ class Controller:
             self.last_lr = self.mod.last_mod_lr
             self.last_delta = self.mod.last_delta
             self.last_raw = self.mod.last_raw
+        elif self.kind == "ema_gac":
+            self.ema_gac.on_batch_end(loss_value)
+            self.last_lr = self.ema_gac.last_mod_lr
+            self.last_delta = self.ema_gac.last_delta
+            self.last_raw = self.ema_gac.last_raw
         elif self.kind == "random":
             self.random.on_batch_end(loss_value)
             self.last_lr = self.random.last_lr
@@ -995,6 +1282,11 @@ class Controller:
             self.last_lr = self.mod.last_mod_lr
             self.last_delta = self.mod.last_delta
             self.last_raw = self.mod.last_raw
+        elif self.kind == "ema_gac":
+            self.ema_gac.on_epoch_end(metric)
+            self.last_lr = self.ema_gac.last_mod_lr
+            self.last_delta = self.ema_gac.last_delta
+            self.last_raw = self.ema_gac.last_raw
         elif self.kind == "random":
             self.random.on_epoch_end(metric)
             self.last_lr = self.random.last_lr
@@ -1020,6 +1312,8 @@ class Controller:
             return {}
         if self.kind == "mod":
             return self.mod.stats()
+        if self.kind == "ema_gac":
+            return self.ema_gac.stats()
         if self.kind == "random":
             return self.random.stats()
         if self.kind == "l4":

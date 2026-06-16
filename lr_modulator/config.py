@@ -36,7 +36,7 @@ class ExperimentConfig:
     use_amp: bool = True
     # Reviewer-facing curves. If True, test loss/accuracy are logged at every epoch.
     # Disable for very large/time-constrained runs.
-    eval_test_each_epoch: bool = True
+    eval_test_each_epoch: bool = False
     num_workers: int = 2
     download: bool = True
 
@@ -71,12 +71,16 @@ class ExperimentConfig:
             "ours_cosine",
             "ours_onecycle",
             "ours_warmup_cosine",
+            "ema_gac_cosine",
+            "ema_gac_onecycle",
+            "ema_gac_warmup_cosine",
+            "ema_gac_plateau",
             "ours_plateau",
         ]
     )
     extra_baselines_cifar10: List[str] = field(default_factory=lambda: ["constant", "step"])
-    regression_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "warmup_cosine", "plateau", "random_cosine", "random_warmup_cosine", "random_plateau", "l4_sgd", "hyper_sgd", "ours_cosine", "ours_warmup_cosine", "ours_plateau"])
-    segmentation_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "warmup_cosine", "plateau", "random_cosine", "random_warmup_cosine", "random_plateau", "ours_cosine", "ours_warmup_cosine", "ours_plateau"])
+    regression_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "warmup_cosine", "plateau", "random_cosine", "random_warmup_cosine", "random_plateau", "l4_sgd", "hyper_sgd", "ours_cosine", "ours_warmup_cosine", "ema_gac_warmup_cosine", "ema_gac_cosine", "ours_plateau"])
+    segmentation_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "warmup_cosine", "plateau", "random_cosine", "random_warmup_cosine", "random_plateau", "ours_cosine", "ours_warmup_cosine", "ema_gac_warmup_cosine", "ema_gac_cosine", "ours_plateau"])
 
     do_finetune: bool = True
     finetune_datasets: List[str] = field(default_factory=lambda: ["oxfordiiitpet"])
@@ -102,6 +106,10 @@ class ExperimentConfig:
             "ours_cosine",
             "ours_onecycle",
             "ours_warmup_cosine",
+            "ema_gac_cosine",
+            "ema_gac_onecycle",
+            "ema_gac_warmup_cosine",
+            "ema_gac_plateau",
             "ours_plateau",
         ]
     )
@@ -194,6 +202,26 @@ class ExperimentConfig:
     beta_fixed: float = 0.01
     target_mean_abs_delta: float = 0.01
     beta_cap: float = 1.0
+
+
+    # EMA-GAC: dual-EMA trend + gradient-alignment confirmation.
+    # The signal observed after batch t is applied only to r_{t+1}.
+    ema_gac_alpha_fast: float = 0.90
+    ema_gac_alpha_slow: float = 0.99
+    ema_gac_volatility_alpha: float = 0.95
+    ema_gac_alignment_alpha: float = 0.90
+    ema_gac_beta_up: float = 1.0
+    ema_gac_beta_down: float = 1.5
+    ema_gac_gamma_up: float = 0.015
+    ema_gac_gamma_down: float = 0.05
+    ema_gac_dead_zone: float = 0.10
+    ema_gac_eps: float = 1e-8
+    ema_gac_phase_start: float = 0.05
+    ema_gac_phase_end: float = 0.90
+    ema_gac_use_phase_envelope: bool = True
+    ema_gac_confirmation_mode: str = "strict"  # strict, soft, loss_only, alignment_only
+    ema_gac_gradient_sample_stride: int = 1
+    ema_gac_max_gradient_tensors: int = 0  # 0 = all tensors
 
     # Random bounded modulation rival
     random_delta_gamma: float = 0.05

@@ -109,7 +109,7 @@ def build_parser():
         default=None,
         help=(
             "Example: --methods cosine random_cosine l4_sgd hyper_sgd "
-            "dadapt_sgd prodigy ours_plateau ours_cosine ours_onecycle ours_warmup_cosine"
+            "dadapt_sgd prodigy ema_gac_warmup_cosine ema_gac_cosine ours_plateau ours_cosine"
         ),
     )
 
@@ -122,6 +122,23 @@ def build_parser():
     p.add_argument("--dead-zone-tau", type=float, default=None, help="Legacy alias for --trend-conf-tau")
     p.add_argument("--trend-conf-tau", type=float, default=None)
     p.add_argument("--hc-h", type=float, default=None)
+
+    # EMA-GAC controls
+    p.add_argument("--ema-gac-alpha-fast", type=float, default=None)
+    p.add_argument("--ema-gac-alpha-slow", type=float, default=None)
+    p.add_argument("--ema-gac-volatility-alpha", type=float, default=None)
+    p.add_argument("--ema-gac-alignment-alpha", type=float, default=None)
+    p.add_argument("--ema-gac-beta-up", type=float, default=None)
+    p.add_argument("--ema-gac-beta-down", type=float, default=None)
+    p.add_argument("--ema-gac-gamma-up", type=float, default=None)
+    p.add_argument("--ema-gac-gamma-down", type=float, default=None)
+    p.add_argument("--ema-gac-dead-zone", type=float, default=None)
+    p.add_argument("--ema-gac-phase-start", type=float, default=None)
+    p.add_argument("--ema-gac-phase-end", type=float, default=None)
+    p.add_argument("--ema-gac-confirmation-mode", choices=["strict", "soft", "loss_only", "alignment_only"], default=None)
+    p.add_argument("--ema-gac-gradient-sample-stride", type=int, default=None)
+    p.add_argument("--ema-gac-max-gradient-tensors", type=int, default=None)
+    p.add_argument("--ema-gac-no-phase-envelope", action="store_true")
 
     p.add_argument("--mod-warmup-steps", type=int, default=None)
     p.add_argument("--sched-warmup-steps", type=int, default=None)
@@ -166,6 +183,28 @@ def apply_cli_overrides(config: ExperimentConfig, args) -> None:
         config.dead_zone_tau = args.trend_conf_tau
     if args.hc_h is not None:
         config.hc_h = args.hc_h
+
+    for arg_name, config_name in [
+        ("ema_gac_alpha_fast", "ema_gac_alpha_fast"),
+        ("ema_gac_alpha_slow", "ema_gac_alpha_slow"),
+        ("ema_gac_volatility_alpha", "ema_gac_volatility_alpha"),
+        ("ema_gac_alignment_alpha", "ema_gac_alignment_alpha"),
+        ("ema_gac_beta_up", "ema_gac_beta_up"),
+        ("ema_gac_beta_down", "ema_gac_beta_down"),
+        ("ema_gac_gamma_up", "ema_gac_gamma_up"),
+        ("ema_gac_gamma_down", "ema_gac_gamma_down"),
+        ("ema_gac_dead_zone", "ema_gac_dead_zone"),
+        ("ema_gac_phase_start", "ema_gac_phase_start"),
+        ("ema_gac_phase_end", "ema_gac_phase_end"),
+        ("ema_gac_confirmation_mode", "ema_gac_confirmation_mode"),
+        ("ema_gac_gradient_sample_stride", "ema_gac_gradient_sample_stride"),
+        ("ema_gac_max_gradient_tensors", "ema_gac_max_gradient_tensors"),
+    ]:
+        value = getattr(args, arg_name, None)
+        if value is not None:
+            setattr(config, config_name, value)
+    if getattr(args, "ema_gac_no_phase_envelope", False):
+        config.ema_gac_use_phase_envelope = False
 
     if args.mod_warmup_steps is not None:
         config.mod_warmup_steps = args.mod_warmup_steps
