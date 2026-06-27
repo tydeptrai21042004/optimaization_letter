@@ -534,6 +534,250 @@ class EMALossModulator:
         }
 
 
+class HCGACModulator:
+    """HC-convolutional trend with gradient-alignment confirmation.
+
+    This is the stronger online scheduler intended for paper experiments when the
+    pure HC loss-feedback modulator is too weak.  It keeps the adapted, delayed
+    Hartley--cosine convolution as the loss-trend estimator, but confirms the
+    sign and confidence of that trend with consecutive-gradient cosine alignment.
+
+    Causal next-step rule:
+        after backward at batch t: estimate a_t = cos(g_t, g_{t-1});
+        after observing L_t: compute delayed HC trend q_t from losses only up to t;
+        normalize and dead-zone q_t; confirm it by a_t; then apply
+        eta_{t+1} = r_{t+1}(1 + delta_t).
+    """
+
+    def __init__(
+        self,
+        optimizer: Optimizer,
+        config: ExperimentConfig,
+        base_mode: str,
+        total_steps: int,
+        steps_per_epoch: int,
+        base_lr: float,
+        min_lr: float,
+    ) -> None:
+        self.optimizer = optimizer
+        self.config = config
+        self.total_steps = max(1, int(total_steps))
+        self.hc = EMALossModulator(
+            optimizer=optimizer,
+            config=config,
+            base_mode=base_mode,
+            total_steps=total_steps,
+            steps_per_epoch=steps_per_epoch,
+            base_lr=base_lr,
+            min_lr=min_lr,
+            variant="full",
+        )
+
+        self.prev_grads: List[torch.Tensor] = []
+        self.alignment_ema = 0.0
+        self.last_alignment = 0.0
+        self.last_confirmed_signal = 0.0
+        self.last_phase_envelope = 0.0
+
+        self.total_mod_steps = 0
+        self.active_mod_steps = 0
+        self.confirmed_steps = 0
+        self.clip_count = 0
+        self.positive_steps = 0
+        self.negative_steps = 0
+        self.delta_abs_sum = 0.0
+        self.alignment_abs_sum = 0.0
+        self.trend_abs_sum = 0.0
+
+        self.last_base_lr = float(self.hc.last_base_lr)
+        self.last_mod_lr = float(self.hc.last_mod_lr)
+        self.last_delta = 0.0
+        self.last_raw = 0.0
+        self.last_score = 0.0
+        self.last_beta_eff = 0.0
+        self.last_ema = 0.0
+        self.last_u = 0.0
+        self.last_clipped = False
+        self.last_emergency_clipped = False
+        self.step_idx = 0
+
+    def _set_lr(self, lr: float) -> None:
+        for pg in self.optimizer.param_groups:
+            pg["lr"] = float(lr)
+
+    def _selected_gradients(self) -> List[torch.Tensor]:
+        stride = max(1, _cfg_int(self.config, "ema_gac_gradient_sample_stride", default=1))
+        max_tensors = max(0, _cfg_int(self.config, "ema_gac_max_gradient_tensors", default=0))
+        selected: List[torch.Tensor] = []
+        tensor_idx = 0
+        for group in self.optimizer.param_groups:
+            for parameter in group["params"]:
+                if parameter.grad is None:
+                    continue
+                if tensor_idx % stride == 0:
+                    selected.append(parameter.grad.detach().clone())
+                    if max_tensors and len(selected) >= max_tensors:
+                        return selected
+                tensor_idx += 1
+        return selected
+
+    @staticmethod
+    def _cosine_alignment(current: List[torch.Tensor], previous: List[torch.Tensor], eps: float) -> float:
+        if not current or not previous or len(current) != len(previous):
+            return 0.0
+        dot = 0.0
+        norm_current = 0.0
+        norm_previous = 0.0
+        for now, before in zip(current, previous):
+            if now.shape != before.shape:
+                return 0.0
+            now_f = now.float()
+            before_f = before.to(device=now.device, dtype=torch.float32)
+            dot += float(torch.sum(now_f * before_f).item())
+            norm_current += float(torch.sum(now_f * now_f).item())
+            norm_previous += float(torch.sum(before_f * before_f).item())
+        denom = math.sqrt(max(norm_current * norm_previous, 0.0)) + eps
+        return float(np.clip(dot / denom, -1.0, 1.0))
+
+    def on_after_backward(self, loss_value: float) -> None:
+        eps = _cfg_float(self.config, "ema_gac_eps", default=1e-8)
+        current = self._selected_gradients()
+        alignment = self._cosine_alignment(current, self.prev_grads, eps)
+        alpha = float(np.clip(_cfg_float(self.config, "ema_gac_alignment_alpha", default=0.90), 0.0, 0.999999))
+        self.alignment_ema = alpha * self.alignment_ema + (1.0 - alpha) * alignment
+        self.last_alignment = float(alignment)
+        self.prev_grads = current
+
+    def _phase_envelope(self, next_step: int) -> float:
+        if not bool(_cfg_get(self.config, "ema_gac_use_phase_envelope", default=True)):
+            return 1.0
+        progress = float(np.clip(next_step / self.total_steps, 0.0, 1.0))
+        start = float(np.clip(_cfg_float(self.config, "ema_gac_phase_start", default=0.05), 0.0, 1.0))
+        end = float(np.clip(_cfg_float(self.config, "ema_gac_phase_end", default=0.90), start + 1e-6, 1.0))
+        if progress <= start or progress >= end:
+            return 0.0
+        local = (progress - start) / (end - start)
+        return float(math.sin(math.pi * local) ** 2)
+
+    def _confirmed_signal(self, trend_score: float) -> float:
+        alignment = float(np.clip(self.alignment_ema, -1.0, 1.0))
+        mode = _cfg_str(self.config, "ema_gac_confirmation_mode", default="strict").lower()
+        if mode == "loss_only":
+            return trend_score
+        if mode == "alignment_only":
+            return alignment
+        if mode == "soft":
+            return math.copysign(math.sqrt(abs(trend_score) * max(alignment, 0.0)), trend_score) if alignment > 0 else 0.0
+        if (trend_score > 0.0 and alignment > 0.0) or (trend_score < 0.0 and alignment < 0.0):
+            return math.copysign(math.sqrt(abs(trend_score * alignment)), trend_score)
+        return 0.0
+
+    def on_batch_end(self, loss_value: float) -> None:
+        loss_value = float(loss_value)
+        u = self.hc.phi(loss_value)
+        self.hc.last_u = float(u)
+        self.hc.u_hist.append(float(u))
+        var = self.hc._update_signal_variance(u)
+
+        self.last_base_lr = self.hc.base.on_batch_end()
+
+        raw_t = 0.0
+        score_t = 0.0
+        confirmed = 0.0
+        delta_t = 0.0
+        beta_eff = 0.0
+        clipped = False
+
+        if self.hc.batch_idx >= self.hc.mod_warmup_steps:
+            trend = self.hc._hc_trend(self.hc.batch_idx)
+            if trend is not None:
+                raw_t = float(trend)
+                score_t = raw_t
+                if self.hc._use_noise_normalization():
+                    eps = _cfg_float(self.config, "eps_trend", default=1e-8)
+                    score_t = raw_t / (math.sqrt(max(var, 0.0)) + eps)
+                score_t = float(np.clip(score_t, -5.0, 5.0))
+                score_t = math.tanh(score_t)
+
+                dead_zone = max(0.0, _cfg_float(self.config, "ema_gac_dead_zone", default=0.10))
+                score_after_deadzone = math.copysign(max(abs(score_t) - dead_zone, 0.0), score_t)
+                confirmed = self._confirmed_signal(score_after_deadzone)
+
+                envelope = self._phase_envelope(self.hc.batch_idx + 1)
+                self.last_phase_envelope = envelope
+                beta_up = max(0.0, _cfg_float(self.config, "ema_gac_beta_up", default=1.0))
+                beta_down = max(0.0, _cfg_float(self.config, "ema_gac_beta_down", default=1.5))
+                gamma_up = float(np.clip(_cfg_float(self.config, "ema_gac_gamma_up", default=0.015), 0.0, 0.95))
+                gamma_down = float(np.clip(_cfg_float(self.config, "ema_gac_gamma_down", default=0.05), 0.0, 0.95))
+
+                if confirmed >= 0.0:
+                    delta_t = envelope * gamma_up * math.tanh(beta_up * confirmed)
+                    beta_eff = beta_up
+                    bound = gamma_up
+                else:
+                    delta_t = envelope * gamma_down * math.tanh(beta_down * confirmed)
+                    beta_eff = beta_down
+                    bound = gamma_down
+
+                unclipped = delta_t
+                delta_t = float(np.clip(delta_t, -gamma_down, gamma_up))
+                clipped = not math.isclose(delta_t, unclipped, rel_tol=0.0, abs_tol=1e-15)
+
+                self.total_mod_steps += 1
+                active = abs(delta_t) > 0.0
+                self.active_mod_steps += int(active)
+                self.confirmed_steps += int(abs(confirmed) > 0.0)
+                self.clip_count += int(clipped)
+                self.positive_steps += int(delta_t > 0.0)
+                self.negative_steps += int(delta_t < 0.0)
+                self.delta_abs_sum += abs(delta_t)
+                self.alignment_abs_sum += abs(self.alignment_ema)
+                self.trend_abs_sum += abs(score_t)
+
+        self.last_raw = float(raw_t)
+        self.last_score = float(score_t)
+        self.last_confirmed_signal = float(confirmed)
+        self.last_delta = float(delta_t)
+        self.last_beta_eff = float(beta_eff)
+        self.last_ema = float(self.hc.last_ema)
+        self.last_u = float(self.hc.last_u)
+        self.last_clipped = bool(clipped)
+        self.last_emergency_clipped = False
+        self.last_mod_lr = float(self.last_base_lr * (1.0 + delta_t))
+        self._set_lr(self.last_mod_lr)
+        self.hc.batch_idx += 1
+        self.step_idx = self.hc.batch_idx
+
+    def on_epoch_end(self, metric: Optional[float] = None) -> None:
+        self.last_base_lr = self.hc.base.on_epoch_end(metric)
+        self.last_mod_lr = float(self.last_base_lr * (1.0 + self.last_delta))
+        self._set_lr(self.last_mod_lr)
+
+    def stats(self) -> Dict[str, float]:
+        n = max(self.total_mod_steps, 1)
+        return {
+            "clip_rate": float(self.clip_count / n),
+            "active_mod_rate": float(self.active_mod_steps / n),
+            "confirmation_rate": float(self.confirmed_steps / n),
+            "positive_delta_rate": float(self.positive_steps / n),
+            "negative_delta_rate": float(self.negative_steps / n),
+            "delta_mean_abs_final": float(self.delta_abs_sum / n),
+            "alignment_mean_abs": float(self.alignment_abs_sum / n),
+            "trend_score_mean_abs": float(self.trend_abs_sum / n),
+            "last_alignment": float(self.last_alignment),
+            "last_alignment_ema": float(self.alignment_ema),
+            "last_trend_score": float(self.last_score),
+            "last_confirmed_signal": float(self.last_confirmed_signal),
+            "last_phase_envelope": float(self.last_phase_envelope),
+            "last_hc_z": float(self.hc.last_hc_z),
+            "last_u": float(self.hc.last_u),
+            "last_loss_var": float(self.hc.last_loss_var),
+            "hc_delay": float(self.hc.hc_delay),
+            "hc_warmup_steps": float(self.hc.mod_warmup_steps),
+            "hc_kernel_l1": float(self.hc.hc_kernel_l1),
+        }
+
+
 class EMAGACModulator:
     """EMA trend with Gradient-Alignment Confirmation (EMA-GAC).
 
@@ -1098,6 +1342,27 @@ class Controller:
             self.last_delta = 0.0
             self.last_raw = 0.0
 
+        elif method in {"hc_gac_cosine", "hc_gac_onecycle", "hc_gac_warmup_cosine", "hc_gac_plateau"}:
+            self.kind = "hc_gac"
+            base_mode = {
+                "hc_gac_cosine": "cosine",
+                "hc_gac_onecycle": "onecycle",
+                "hc_gac_warmup_cosine": "warmup_cosine",
+                "hc_gac_plateau": "plateau",
+            }[method]
+            self.hc_gac = HCGACModulator(
+                optimizer=optimizer,
+                config=config,
+                base_mode=base_mode,
+                total_steps=total_steps,
+                steps_per_epoch=steps_per_epoch,
+                base_lr=base_lr,
+                min_lr=min_lr,
+            )
+            self.last_lr = self.hc_gac.last_mod_lr
+            self.last_delta = 0.0
+            self.last_raw = 0.0
+
         elif method in {"ema_gac_cosine", "ema_gac_onecycle", "ema_gac_warmup_cosine", "ema_gac_plateau"}:
             self.kind = "ema_gac"
             base_mode = {
@@ -1187,6 +1452,18 @@ class Controller:
             self.last_u_signal = float(self.mod.last_u)
             self.last_clipped = bool(self.mod.last_clipped)
             self.last_emergency_clipped = bool(self.mod.last_emergency_clipped)
+        elif self.kind == "hc_gac":
+            self.last_base_lr = float(self.hc_gac.last_base_lr)
+            self.last_beta_eff = float(self.hc_gac.last_beta_eff)
+            self.last_ema_loss = float(self.hc_gac.last_ema)
+            self.last_u_signal = float(self.hc_gac.last_u)
+            self.last_clipped = bool(self.hc_gac.last_clipped)
+            self.last_emergency_clipped = False
+            self.last_alignment = float(self.hc_gac.last_alignment)
+            self.last_alignment_ema = float(self.hc_gac.alignment_ema)
+            self.last_trend_score = float(self.hc_gac.last_score)
+            self.last_confirmed_signal = float(self.hc_gac.last_confirmed_signal)
+            self.last_phase_envelope = float(self.hc_gac.last_phase_envelope)
         elif self.kind == "ema_gac":
             self.last_base_lr = float(self.ema_gac.last_base_lr)
             self.last_beta_eff = float(self.ema_gac.last_beta_eff)
@@ -1218,7 +1495,12 @@ class Controller:
         self.last_grad_norm_sq = float(value)
 
     def on_after_backward(self, loss_value: float) -> None:
-        if self.kind == "ema_gac":
+        if self.kind == "hc_gac":
+            self.hc_gac.on_after_backward(loss_value)
+            self.last_lr = self.hc_gac.last_mod_lr
+            self.last_delta = self.hc_gac.last_delta
+            self.last_raw = self.hc_gac.last_raw
+        elif self.kind == "ema_gac":
             self.ema_gac.on_after_backward(loss_value)
             self.last_lr = self.ema_gac.last_mod_lr
             self.last_delta = self.ema_gac.last_delta
@@ -1247,6 +1529,11 @@ class Controller:
             self.last_lr = self.mod.last_mod_lr
             self.last_delta = self.mod.last_delta
             self.last_raw = self.mod.last_raw
+        elif self.kind == "hc_gac":
+            self.hc_gac.on_batch_end(loss_value)
+            self.last_lr = self.hc_gac.last_mod_lr
+            self.last_delta = self.hc_gac.last_delta
+            self.last_raw = self.hc_gac.last_raw
         elif self.kind == "ema_gac":
             self.ema_gac.on_batch_end(loss_value)
             self.last_lr = self.ema_gac.last_mod_lr
@@ -1282,6 +1569,11 @@ class Controller:
             self.last_lr = self.mod.last_mod_lr
             self.last_delta = self.mod.last_delta
             self.last_raw = self.mod.last_raw
+        elif self.kind == "hc_gac":
+            self.hc_gac.on_epoch_end(metric)
+            self.last_lr = self.hc_gac.last_mod_lr
+            self.last_delta = self.hc_gac.last_delta
+            self.last_raw = self.hc_gac.last_raw
         elif self.kind == "ema_gac":
             self.ema_gac.on_epoch_end(metric)
             self.last_lr = self.ema_gac.last_mod_lr
@@ -1312,6 +1604,8 @@ class Controller:
             return {}
         if self.kind == "mod":
             return self.mod.stats()
+        if self.kind == "hc_gac":
+            return self.hc_gac.stats()
         if self.kind == "ema_gac":
             return self.ema_gac.stats()
         if self.kind == "random":

@@ -71,6 +71,10 @@ class ExperimentConfig:
             "ours_cosine",
             "ours_onecycle",
             "ours_warmup_cosine",
+            "hc_gac_cosine",
+            "hc_gac_onecycle",
+            "hc_gac_warmup_cosine",
+            "hc_gac_plateau",
             "ema_gac_cosine",
             "ema_gac_onecycle",
             "ema_gac_warmup_cosine",
@@ -79,8 +83,8 @@ class ExperimentConfig:
         ]
     )
     extra_baselines_cifar10: List[str] = field(default_factory=lambda: ["constant", "step"])
-    regression_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "warmup_cosine", "plateau", "random_cosine", "random_warmup_cosine", "random_plateau", "l4_sgd", "hyper_sgd", "ours_cosine", "ours_warmup_cosine", "ema_gac_warmup_cosine", "ema_gac_cosine", "ours_plateau"])
-    segmentation_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "warmup_cosine", "plateau", "random_cosine", "random_warmup_cosine", "random_plateau", "ours_cosine", "ours_warmup_cosine", "ema_gac_warmup_cosine", "ema_gac_cosine", "ours_plateau"])
+    regression_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "warmup_cosine", "plateau", "random_cosine", "random_warmup_cosine", "random_plateau", "l4_sgd", "hyper_sgd", "ours_cosine", "ours_warmup_cosine", "hc_gac_warmup_cosine", "hc_gac_cosine", "ema_gac_warmup_cosine", "ema_gac_cosine", "ours_plateau"])
+    segmentation_methods: List[str] = field(default_factory=lambda: ["constant", "cosine", "warmup_cosine", "plateau", "random_cosine", "random_warmup_cosine", "random_plateau", "ours_cosine", "ours_warmup_cosine", "hc_gac_warmup_cosine", "hc_gac_cosine", "ema_gac_warmup_cosine", "ema_gac_cosine", "ours_plateau"])
 
     do_finetune: bool = True
     finetune_datasets: List[str] = field(default_factory=lambda: ["oxfordiiitpet"])
@@ -106,6 +110,10 @@ class ExperimentConfig:
             "ours_cosine",
             "ours_onecycle",
             "ours_warmup_cosine",
+            "hc_gac_cosine",
+            "hc_gac_onecycle",
+            "hc_gac_warmup_cosine",
+            "hc_gac_plateau",
             "ema_gac_cosine",
             "ema_gac_onecycle",
             "ema_gac_warmup_cosine",
