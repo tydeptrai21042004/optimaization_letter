@@ -24,6 +24,7 @@ The delay is essential. The weighted `h`-Hartley--cosine convolution is two-side
 | `ours_cosine` | Legacy HC-convolutional modulator on top of cosine |
 | `ours_onecycle` | Proposed HC-convolutional modulator on top of one-cycle |
 | `ours_warmup_cosine` | Proposed HC-convolutional modulator on top of warmup-cosine |
+| `hc_gac_cosine`, `hc_gac_onecycle`, `hc_gac_warmup_cosine`, `hc_gac_plateau` | Stronger online HC-convolutional scheduler with gradient-alignment confirmation; recommended when the pure loss-feedback modulation is too weak |
 | `ours_no_hc_cosine` | Ablation without Hartley--cosine convolution |
 | `ours_no_noise_norm_cosine` | Ablation without noise normalization |
 | `ours_no_gate_cosine` | Ablation without trend-confidence gate |
@@ -172,7 +173,7 @@ python run_kaggle.py \
   --batch-size 128 \
   --lr 0.1 \
   --seeds 0 1 2 3 4 \
-  --methods cosine onecycle warmup_cosine plateau random_cosine random_onecycle l4_sgd hyper_sgd dadapt_sgd prodigy ours_cosine ours_onecycle ours_warmup_cosine
+  --methods cosine onecycle warmup_cosine plateau random_cosine random_onecycle l4_sgd hyper_sgd dadapt_sgd prodigy ours_cosine ours_onecycle ours_warmup_cosine hc_gac_cosine hc_gac_warmup_cosine hc_gac_plateau
 ```
 
 For a quick debug run:
