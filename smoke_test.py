@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import torch
@@ -182,9 +181,7 @@ def main() -> None:
     out_path = Path("smoke_test_output.json")
     out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    print("Smoke test passed.")
-    print(json.dumps(payload, indent=2), flush=True)
-    os._exit(0)
+    print(f"Smoke test passed: {len(results)} runs; output={out_path}", flush=True)
 
 
 if __name__ == "__main__":

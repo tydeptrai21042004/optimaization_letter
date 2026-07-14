@@ -1,38 +1,33 @@
 {
   "num_seeds": 200,
+  "method": "causal_ema_h_hartley",
   "m_win": 3,
-  "hc_delay": 4,
+  "alpha": 0.95,
+  "rho": 0.8,
+  "hc_delay": 0,
   "trend_conf_tau": 0.15,
-  "old_ema_direction_accuracy_all_responses": {
-    "mean": 0.723816067653277,
-    "std": 0.022166636635653835
+  "no_ema_direction_accuracy": {
+    "mean": 0.5392055084745763,
+    "std": 0.01529251280088577
   },
-  "new_hc_direction_precision_when_active": {
-    "mean": 0.8216112874796879,
-    "std": 0.05009532402883483
+  "corrected_direction_precision_when_active": {
+    "mean": 0.6904905961505673,
+    "std": 0.023881083648977407
   },
-  "new_hc_nonflat_coverage": {
-    "mean": 0.153446088794926,
-    "std": 0.01984322229809552
+  "corrected_nonflat_coverage": {
+    "mean": 0.9313983050847457,
+    "std": 0.010680291169001058
   },
-  "old_ema_false_active_rate_flat": {
-    "mean": 1.0,
-    "std": 0.0
+  "corrected_false_active_rate_flat": {
+    "mean": 0.9298979591836735,
+    "std": 0.02679924427907354
   },
-  "new_hc_false_active_rate_flat": {
-    "mean": 0.11859375,
-    "std": 0.03876064625414294
+  "corrected_active_rate": {
+    "mean": 0.931140350877193,
+    "std": 0.009589430100829606
   },
-  "old_ema_mean_abs_signal": {
-    "mean": 0.0013609045250487146,
-    "std": 6.017202169840683e-05
-  },
-  "new_hc_mean_abs_signal_gated": {
-    "mean": 0.02928568477382812,
-    "std": 0.004049843477065322
-  },
-  "new_hc_active_rate_all_valid_steps": {
-    "mean": 0.1475659050966608,
-    "std": 0.01871027851784306
+  "max_ratio_to_conservative_kernel_bound": {
+    "mean": 0.0035565516467972974,
+    "std": 0.001013328771039108
   }
 }

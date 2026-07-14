@@ -1,18 +1,20 @@
-# HC-GAC online scheduler patch
+# HC-GAC implementation notes
 
-## Why this patch was added
+The `hc_gac_*` methods use the corrected causal EMA–\(h\)-Hartley feedback signal and add consecutive-gradient cosine-alignment confirmation.
 
-The original `ours_*` controller is mathematically clean but often too weak in practice:
+The loss-side signal is
 
-- the default modulation cap is small (`gamma=0.05`);
-- the fixed gain is very small (`beta_fixed=0.01`);
-- the delayed Hartley--cosine convolution needs warm-up steps before becoming active;
-- the trend-confidence gate can make `active_mod_rate` close to zero;
-- using `plateau` as the base scheduler means the base LR policy can dominate the micro-modulation.
+\[
+\bar L_t=\alpha\bar L_{t-1}+(1-\alpha)L_t,
+\quad
+u_t=\phi(\bar L_t),
+\quad
+s_t=\frac h2\sum_{m=1}^{M}w_m(u_{t-m}-u_t).
+\]
 
-The new `hc_gac_*` methods keep the delayed HC convolution, but add gradient-alignment confirmation. The loss history estimates direction; the gradient cosine alignment decides whether the online LR change is trustworthy.
+There is no delayed two-sided HC-cosine evaluation. At time `t`, only indices `t-M,...,t` are used. Gradient information observed after backward does not change the learning rate already used by the current optimizer step; the confirmed signal modulates only the next base rate.
 
-## New methods
+Methods:
 
 ```text
 hc_gac_cosine
@@ -21,30 +23,13 @@ hc_gac_warmup_cosine
 hc_gac_plateau
 ```
 
-## Recommended first experiment
+Recommended first check:
 
 ```bash
-python run_kaggle.py \
-  --mode suite \
-  --task scratch \
-  --dataset cifar10 \
-  --model resnet18 \
-  --epochs 40 \
-  --batch-size 128 \
-  --lr 0.1 \
-  --seeds 0 1 2 3 4 \
-  --methods cosine warmup_cosine plateau random_cosine ours_cosine ours_plateau ema_gac_cosine hc_gac_cosine hc_gac_warmup_cosine hc_gac_plateau \
-  --m-win 1 \
-  --rho 0.8 \
-  --ema-gac-dead-zone 0.05 \
-  --ema-gac-gamma-up 0.02 \
-  --ema-gac-gamma-down 0.06 \
-  --ema-gac-confirmation-mode soft
+python -m pytest tests/test_hc_gac_scheduler.py -q
 ```
 
-## What to report
-
-For each run, inspect the summary statistics:
+Useful summary fields:
 
 ```text
 active_mod_rate
@@ -56,22 +41,5 @@ alignment_mean_abs
 trend_score_mean_abs
 last_hc_z
 hc_warmup_steps
-```
-
-If `active_mod_rate < 0.10`, the controller is still too conservative. Try:
-
-```bash
---ema-gac-dead-zone 0.03 --ema-gac-confirmation-mode soft
-```
-
-If `delta_mean_abs_final < 0.005`, the modulation is too small. Try:
-
-```bash
---ema-gac-gamma-up 0.03 --ema-gac-gamma-down 0.08
-```
-
-If the method is unstable, reduce the down/up bounds:
-
-```bash
---ema-gac-gamma-up 0.01 --ema-gac-gamma-down 0.03
+causal_kernel_norm
 ```

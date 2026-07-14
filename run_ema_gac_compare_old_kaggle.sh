@@ -62,7 +62,7 @@ printf '============================================================\n'
 # Fair comparison groups:
 #   warmup_cosine           : unmodified strong base schedule
 #   random_warmup_cosine    : random bounded-control baseline
-#   ours_warmup_cosine      : old delayed HC proposal
+#   ours_warmup_cosine      : corrected causal EMA--h-Hartley proposal
 #   ema_gac_warmup_cosine   : new EMA-GAC proposal
 #   cosine / onecycle       : additional strong schedule baselines
 #

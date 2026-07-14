@@ -63,7 +63,7 @@ def test_hc_gac_is_registered_for_all_base_schedules() -> None:
         assert controller.kind == "hc_gac"
 
 
-def test_hc_gac_uses_delayed_convolution_and_keeps_positive_lr() -> None:
+def test_hc_gac_uses_causal_hartley_feedback_and_keeps_positive_lr() -> None:
     cfg = _config()
     parameter, optimizer, mod = _make_modulator(cfg)
 
@@ -73,7 +73,11 @@ def test_hc_gac_uses_delayed_convolution_and_keeps_positive_lr() -> None:
         mod.on_after_backward(0.0)
         assert float(optimizer.param_groups[0]["lr"]) == lr_before_gradient_observation
         mod.on_batch_end(1.0 / (step + 1))
-        assert mod.hc.max_index_used_by_delayed_hc(mod.hc.batch_idx - 1) <= mod.hc.batch_idx - 1
+        t = mod.hc.batch_idx - 1
+        if t >= mod.hc.m_win:
+            first, last = mod.hc.causal_index_range(t)
+            assert first == t - mod.hc.m_win
+            assert last == t
         assert mod.last_mod_lr > 0.0
         assert -cfg.ema_gac_gamma_down <= mod.last_delta <= cfg.ema_gac_gamma_up
 

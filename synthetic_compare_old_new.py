@@ -11,69 +11,52 @@ def phi(x: np.ndarray, c: float = 1.0) -> np.ndarray:
     return x / (c + x + 1e-12)
 
 
-def old_ema_feedback(loss: np.ndarray, alpha: float = 0.90, m_win: int = 3, rho: float = 0.8) -> np.ndarray:
-    """Old EMA-causal trend signal used as a baseline."""
-    u = phi(loss)
-    ema = np.zeros_like(u)
-    for t in range(len(u)):
-        ema[t] = u[t] if t == 0 else alpha * ema[t - 1] + (1.0 - alpha) * u[t]
+def ema(loss: np.ndarray, alpha: float) -> np.ndarray:
+    out = np.zeros_like(loss, dtype=float)
+    for t, value in enumerate(loss):
+        out[t] = value if t == 0 else alpha * out[t - 1] + (1.0 - alpha) * value
+    return out
 
-    weights = np.array([rho ** (m - 1) for m in range(1, m_win + 1)], dtype=float)
+
+def causal_weights(m_win: int, rho: float) -> np.ndarray:
+    weights = np.asarray([rho ** (m - 1) for m in range(1, m_win + 1)], dtype=float)
     weights /= weights.sum()
-    raw = np.zeros_like(u)
+    return weights
+
+
+def causal_feedback(u: np.ndarray, m_win: int, rho: float) -> np.ndarray:
+    """Implementation form of (q_M^e *_H u) + (q_M^o *_H R u)."""
+    weights = causal_weights(m_win, rho)
+    raw = np.zeros_like(u, dtype=float)
     for t in range(m_win, len(u)):
-        raw[t] = sum(weights[m - 1] * (ema[t - m] - ema[t]) for m in range(1, m_win + 1))
+        raw[t] = sum(weights[m - 1] * (u[t - m] - u[t]) for m in range(1, m_win + 1))
     return raw
 
 
-def hc_kernel(m_win: int, rho: float = 0.8, h: float = 1.0) -> dict[int, float]:
-    raw = {m: rho ** abs(m) for m in range(-m_win, m_win + 1)}
-    total = sum(raw.values()) + 1e-12
-    return {m: w / (2.0 * h * total) for m, w in raw.items()}
-
-
-def hc_conv(u: np.ndarray, n: int, kernel: dict[int, float], h: float = 1.0):
-    if n < 0:
-        return None
-    last = len(u) - 1
-    acc = 0.0
-    for m, k in kernel.items():
-        idxs = (n - m - 1, n - m + 1, n + m + 1, n + m - 1)
-        if min(idxs) < 0 or max(idxs) > last:
-            return None
-        acc += k * sum(float(u[j]) for j in idxs)
-    return 0.5 * h * acc
-
-
-def new_hc_feedback(
+def corrected_ema_hartley_feedback(
     loss: np.ndarray,
+    *,
+    alpha: float = 0.95,
     m_win: int = 3,
     rho: float = 0.8,
     var_alpha: float = 0.95,
     tau: float = 0.25,
-    h: float = 1.0,
-) -> tuple[np.ndarray, np.ndarray]:
-    """New delayed HC-convolution score and active gate."""
-    u = phi(loss)
-    D = m_win + 1
-    kernel = hc_kernel(m_win=m_win, rho=rho, h=h)
-    score = np.zeros_like(u)
-    active = np.zeros_like(u, dtype=bool)
-    v = 0.0
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    smoothed = ema(loss, alpha)
+    u = phi(smoothed)
+    raw = causal_feedback(u, m_win=m_win, rho=rho)
+
+    score = np.zeros_like(raw)
+    active = np.zeros_like(raw, dtype=bool)
+    variance = 0.0
     for t in range(1, len(u)):
         du = u[t] - u[t - 1]
-        v = var_alpha * v + (1.0 - var_alpha) * (du * du)
-        if t < 2 * m_win + 3:
+        variance = var_alpha * variance + (1.0 - var_alpha) * du * du
+        if t < m_win:
             continue
-        z_now = hc_conv(u[: t + 1], t - D, kernel, h=h)
-        z_prev = hc_conv(u[: t + 1], t - 1 - D, kernel, h=h)
-        if z_now is None or z_prev is None:
-            continue
-        q = z_prev - z_now
-        s = q / (np.sqrt(max(v, 0.0)) + 1e-8)
-        score[t] = s
-        active[t] = abs(s) >= tau
-    return score, active
+        score[t] = raw[t] / (np.sqrt(max(variance, 0.0)) + 1e-8)
+        active[t] = abs(score[t]) >= tau
+    return raw, score, active
 
 
 def make_loss(seed: int, T: int = 600) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -81,7 +64,7 @@ def make_loss(seed: int, T: int = 600) -> tuple[np.ndarray, np.ndarray, np.ndarr
     t = np.arange(T)
     clean = np.empty(T, dtype=float)
     clean[:220] = 2.0 - 0.0030 * t[:220]
-    clean[220:360] = clean[219] + 0.00005 * (t[220:360] - 220)  # nearly flat
+    clean[220:360] = clean[219] + 0.00005 * (t[220:360] - 220)
     clean[360:] = clean[359] - 0.0017 * (t[360:] - 360)
     clean += 0.035 * np.sin(2.0 * np.pi * t / 55.0)
 
@@ -95,68 +78,71 @@ def make_loss(seed: int, T: int = 600) -> tuple[np.ndarray, np.ndarray, np.ndarr
     return clean, observed, true_trend
 
 
-def summarize(values):
+def summarize(values: list[float]) -> dict[str, float]:
     arr = np.asarray(values, dtype=float)
     return {"mean": float(arr.mean()), "std": float(arr.std(ddof=1))}
 
 
 def main() -> None:
     seeds = list(range(200))
-    old_acc = []
-    new_precision = []
-    new_coverage = []
-    old_false_active = []
-    new_false_active = []
-    old_abs = []
-    new_abs_gated = []
-    new_active_rate = []
-
     m_win = 3
-    delay = m_win + 1
+    alpha = 0.95
+    rho = 0.8
     tau = 0.15
 
+    no_ema_accuracy: list[float] = []
+    corrected_precision: list[float] = []
+    corrected_coverage: list[float] = []
+    corrected_false_active: list[float] = []
+    corrected_active_rate: list[float] = []
+    max_bound_ratio: list[float] = []
+
     for seed in seeds:
-        clean, observed, true_trend = make_loss(seed)
-        old = old_ema_feedback(observed, m_win=m_win)
-        new, active = new_hc_feedback(observed, m_win=m_win, tau=tau)
+        _, observed, true_trend = make_loss(seed)
+        no_ema_raw = causal_feedback(phi(observed), m_win=m_win, rho=rho)
+        corrected_raw, corrected_score, active = corrected_ema_hartley_feedback(
+            observed,
+            alpha=alpha,
+            m_win=m_win,
+            rho=rho,
+            tau=tau,
+        )
 
-        # HC feedback z_t is evaluated at t-D, so compare to the delayed true trend.
-        aligned_trend = np.zeros_like(true_trend)
-        aligned_trend[delay:] = true_trend[:-delay]
+        valid = np.arange(len(observed)) >= max(30, m_win)
+        nonflat = (np.abs(true_trend) > 7.5e-4) & valid
+        flat = (np.abs(true_trend) <= 7.5e-4) & valid
 
-        valid = np.arange(len(observed)) > 30
-        nonflat = (np.abs(aligned_trend) > 7.5e-4) & valid
-        flat = (np.abs(aligned_trend) <= 7.5e-4) & valid
-
-        old_acc.append(np.mean(np.sign(old[nonflat]) == np.sign(aligned_trend[nonflat])))
-
+        no_ema_accuracy.append(float(np.mean(np.sign(no_ema_raw[nonflat]) == np.sign(true_trend[nonflat]))))
         active_nonflat = nonflat & active
-        if active_nonflat.sum() > 0:
-            new_precision.append(np.mean(np.sign(new[active_nonflat]) == np.sign(aligned_trend[active_nonflat])))
-        else:
-            new_precision.append(0.0)
-        new_coverage.append(np.mean(active[nonflat]))
+        corrected_precision.append(
+            float(np.mean(np.sign(corrected_raw[active_nonflat]) == np.sign(true_trend[active_nonflat])))
+            if active_nonflat.any()
+            else 0.0
+        )
+        corrected_coverage.append(float(np.mean(active[nonflat])))
+        corrected_false_active.append(float(np.mean(active[flat])))
+        corrected_active_rate.append(float(np.mean(active[valid])))
 
-        # Old EMA has no confidence gate, so every nonzero response is treated as active.
-        old_false_active.append(float(np.mean(np.abs(old[flat]) > 1e-12)))
-        new_false_active.append(float(np.mean(active[flat])))
-        old_abs.append(float(np.mean(np.abs(old[valid]))))
-        new_abs_gated.append(float(np.mean(np.abs(new[valid]) * active[valid])))
-        new_active_rate.append(float(np.mean(active[valid])))
+        # For bounded phi, ||u||_infty <= 1 and normalized kernel mass is one.
+        # The paper's conservative bound is |raw_t| <= 2 ||u||_infty.
+        u = phi(ema(observed, alpha))
+        denominator = 2.0 * max(float(np.max(np.abs(u))), 1e-12)
+        max_bound_ratio.append(float(np.max(np.abs(corrected_raw)) / denominator))
 
     payload = {
         "num_seeds": len(seeds),
+        "method": "causal_ema_h_hartley",
         "m_win": m_win,
-        "hc_delay": delay,
+        "alpha": alpha,
+        "rho": rho,
+        "hc_delay": 0,
         "trend_conf_tau": tau,
-        "old_ema_direction_accuracy_all_responses": summarize(old_acc),
-        "new_hc_direction_precision_when_active": summarize(new_precision),
-        "new_hc_nonflat_coverage": summarize(new_coverage),
-        "old_ema_false_active_rate_flat": summarize(old_false_active),
-        "new_hc_false_active_rate_flat": summarize(new_false_active),
-        "old_ema_mean_abs_signal": summarize(old_abs),
-        "new_hc_mean_abs_signal_gated": summarize(new_abs_gated),
-        "new_hc_active_rate_all_valid_steps": summarize(new_active_rate),
+        "no_ema_direction_accuracy": summarize(no_ema_accuracy),
+        "corrected_direction_precision_when_active": summarize(corrected_precision),
+        "corrected_nonflat_coverage": summarize(corrected_coverage),
+        "corrected_false_active_rate_flat": summarize(corrected_false_active),
+        "corrected_active_rate": summarize(corrected_active_rate),
+        "max_ratio_to_conservative_kernel_bound": summarize(max_bound_ratio),
     }
     Path("synthetic_compare_output.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(json.dumps(payload, indent=2))

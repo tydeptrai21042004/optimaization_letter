@@ -1,25 +1,7 @@
-# Ours-Plateau balanced rerun
+# Balanced Ours-Plateau runs
 
-This repository has the Plateau-based proposal methods integrated in Python code, so Kaggle bash cells do not need to patch any Python files.
+This note applies to the corrected causal EMA–\(h\)-Hartley controller. Use the same model, split, optimizer, epoch budget, and seed list for `plateau`, `random_plateau`, `ours_no_hc_plateau`, and `ours_plateau`.
 
-Main paper-facing method:
+Recommended paper minimum: at least five seeds, mean ± standard deviation or 95% confidence interval, together with `delta_mean_abs_final`, `active_mod_rate`, and `clip_rate`.
 
-- `ours_plateau`: delayed HC micro-modulation on top of `ReduceLROnPlateau`, with the trend-confidence gate disabled.
-
-Ablation methods:
-
-- `plateau`
-- `random_plateau`
-- `ours_with_gate_plateau`
-- `ours_no_hc_plateau`
-- `ours_no_noise_norm_plateau`
-- `ours_no_clip_plateau`
-- `ours_plateau`
-
-Kaggle command:
-
-```bash
-bash scripts/run_balanced_ours_plateau.sh
-```
-
-Outputs are saved to `/kaggle/working/results_lr_modulator` and zipped manually by the Kaggle cell.
+Earlier results produced by the delayed HC-cosine implementation must not be mixed with corrected-method results.

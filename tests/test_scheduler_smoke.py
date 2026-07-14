@@ -128,7 +128,7 @@ def test_new_hc_ablation_methods_run() -> None:
         _run_controller_method(method, total_steps=12)
 
 
-def test_delayed_hc_convolution_uses_no_future_loss() -> None:
+def test_causal_hartley_feedback_uses_no_future_loss() -> None:
     cfg = ExperimentConfig(
         use_amp=False,
         num_workers=0,
@@ -149,6 +149,7 @@ def test_delayed_hc_convolution_uses_no_future_loss() -> None:
         min_lr=1e-4,
     )
     mod = controller.mod
-    for t in range(2 * cfg.m_win + 3, 2 * cfg.m_win + 8):
-        assert mod.max_index_used_by_delayed_hc(t) <= t
-        assert mod.min_index_used_by_delayed_hc(t) >= 0
+    for t in range(cfg.m_win, cfg.m_win + 5):
+        first, last = mod.causal_index_range(t)
+        assert first == t - cfg.m_win
+        assert last == t

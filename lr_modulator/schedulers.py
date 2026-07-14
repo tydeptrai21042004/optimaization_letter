@@ -214,21 +214,28 @@ class BatchBaseSchedule:
 
 
 class EMALossModulator:
-    """Delayed weighted h-Hartley--cosine loss-feedback LR modulator.
+    """Causal EMA--h-Hartley loss-feedback learning-rate modulator.
 
-    The class name is kept for backward compatibility with older scripts, but the
-    implemented proposed method is no longer an EMA-only controller.  After batch
-    t, the observed loss L_t is mapped to a bounded signal u_t, filtered by a
-    delayed weighted h-Hartley--cosine convolution, converted into a backward
-    filtered-loss trend, normalized by local loss-signal noise, optionally gated by a trend
-    confidence threshold, and clipped before modulating the next base LR:
+    After batch ``t`` the observed loss is first smoothed by an EMA, mapped by a
+    bounded monotone function, and passed through the finite-memory causal signal
+
+        s_t = (h/2) * sum_{m=1}^M w_m (u_{t-m} - u_t).
+
+    The direct formula is the implementation-efficient form of
+
+        (q_M^e *_H u)(th) + (q_M^o *_H R u)(th),
+
+    where q_M is the one-sided difference kernel, q_M^e and q_M^o are its even
+    and odd parts, R is reflection, and *_H is the h-Hartley convolution used in
+    the accompanying mathematics paper.  Only samples u_t,...,u_{t-M} are used.
+
+    The modulation computed from loss L_t is applied to the *next* base learning
+    rate, so the update remains adapted:
 
         eta_{t+1} = r_{t+1} (1 + delta_t).
 
-    The delay D=M+1 is essential.  Direct evaluation of the two-sided generalized
-    convolution at index t would require future losses up to t+M+1.  Evaluating it
-    at t-D makes the largest required index equal to t, so the next-step LR rule
-    remains adapted to the training history.
+    The historical class name and public logging fields are retained so existing
+    experiment scripts remain compatible.
     """
 
     def __init__(
@@ -257,16 +264,23 @@ class EMALossModulator:
 
         self.m_win = max(1, _cfg_int(config, "m_win", default=3))
         self.h_step = max(1e-12, _cfg_float(config, "hc_h", "h_step", default=1.0))
-        delay_cfg = _cfg_int(config, "hc_delay", default=0)
-        self.hc_delay = delay_cfg if delay_cfg > 0 else self.m_win + 1
-        # z_t requires nonnegative indices down to t-D-M-1.  q_t=z_{t-1}-z_t
-        # therefore needs t >= D+M+2.  With D=M+1 this is 2M+3.
-        self.hc_min_warmup = self.hc_delay + self.m_win + 2
+
+        # The corrected causal operator requires exactly M past values and no
+        # artificial delay.  Keep the old public fields for log compatibility.
+        self.hc_delay = 0
+        self.hc_min_warmup = self.m_win
         self.mod_warmup_steps = max(0, _mod_warmup_steps(config), self.hc_min_warmup)
 
-        self.hc_kernel = self._build_hc_kernel()
-        self.hc_kernel_l1 = float(self.h_step * sum(abs(v) for v in self.hc_kernel.values()))
+        self.causal_weights = self._build_causal_weights()
+        self.causal_kernel = self._build_one_sided_difference_kernel()
+        self.causal_kernel_norm = float(
+            0.5 * self.h_step * sum(abs(v) for v in self.causal_weights.values())
+        )
+        # Backward-compatible aliases used by old exporters/tests.
+        self.hc_kernel = dict(self.causal_kernel)
+        self.hc_kernel_l1 = self.causal_kernel_norm
 
+        self.ema_loss: Optional[float] = None
         self.u_hist: List[float] = []
         self.loss_signal_var: Optional[float] = None
         self.raw_abs_ema: Optional[float] = None
@@ -287,38 +301,63 @@ class EMALossModulator:
         self.last_mod_lr = float(self.base.current_lr)
         self.last_beta_eff = 0.0
         self.last_u = 0.0
-        self.last_ema = 0.0  # public logging alias: stores filtered HC value z_t.
+        self.last_ema = 0.0
         self.last_loss_var = 0.0
+        # Legacy name: now stores the causal h-Hartley feedback s_t.
         self.last_hc_z = 0.0
         self.last_clipped = False
         self.last_emergency_clipped = False
         self.last_gate_active = False
 
-    def _build_hc_kernel(self) -> Dict[int, float]:
-        """Build a finite-support symmetric weighted HC kernel.
+    def _build_causal_weights(self) -> Dict[int, float]:
+        """Return normalized exponential weights w(mh), m=1,...,M.
 
-        The raw weights are rho**abs(m), m=-M,...,M.  They are normalized so that
-        a constant input approximately remains constant under the four-shift HC
-        convolution: (h/2)*sum_m kappa_m*(4u) = u.
+        The normalization follows the paper:
+
+            w(mh) = 2 rho^(m-1) / (h Z),
+            Z = sum_{j=1}^M rho^(j-1),
+
+        hence (h/2) sum_m w(mh) = 1.
         """
         rho = float(np.clip(_cfg_float(self.config, "rho", default=0.8), 0.0, 0.999999))
-        raw = {m: rho ** abs(m) for m in range(-self.m_win, self.m_win + 1)}
-        total = sum(raw.values()) + 1e-12
-        norm = 1.0 / (2.0 * self.h_step * total)
-        return {m: float(w * norm) for m, w in raw.items()}
+        raw = {m: rho ** (m - 1) for m in range(1, self.m_win + 1)}
+        z = sum(raw.values())
+        if not math.isfinite(z) or z <= 0.0:
+            raise ValueError("The causal h-Hartley kernel must have positive finite mass.")
+        scale = 2.0 / (self.h_step * z)
+        return {m: float(scale * value) for m, value in raw.items()}
+
+    def _build_one_sided_difference_kernel(self) -> Dict[int, float]:
+        """Build q_M whose ordinary convolution equals the causal feedback.
+
+        q_M(0) = -1/2 sum_m w_m and q_M(mh) = w_m/2 for m=1,...,M.
+        Its even/odd decomposition gives the exact h-Hartley representation used
+        in the mathematics paper.
+        """
+        kernel: Dict[int, float] = {
+            0: -0.5 * sum(self.causal_weights.values())
+        }
+        for m, weight in self.causal_weights.items():
+            kernel[m] = 0.5 * weight
+        return kernel
 
     def phi(self, z: float) -> float:
-        """Bounded monotone loss map used before convolution."""
+        """Bounded monotone loss map used after EMA smoothing."""
         z = max(float(z), 0.0)
-        if self.variant in {"no_phi", "no_ema"} or not bool(_cfg_get(self.config, "use_phi", default=True)):
+        if self.variant == "no_phi" or not bool(_cfg_get(self.config, "use_phi", default=True)):
             return z
-        c_phi = _cfg_float(self.config, "c_phi", default=1.0)
-        return z / (c_phi + z + 1e-12)
+        c_phi = max(1e-12, _cfg_float(self.config, "c_phi", default=1.0))
+        return z / (c_phi + z)
 
     def _set_lr(self, lr: float) -> None:
         lr = float(lr)
+        if not math.isfinite(lr) or lr <= 0.0:
+            raise ValueError(f"Learning rate must remain positive and finite, got {lr!r}.")
         for pg in self.optimizer.param_groups:
             pg["lr"] = lr
+
+    def _use_ema(self) -> bool:
+        return bool(_cfg_get(self.config, "use_ema", default=True)) and self.variant != "no_ema"
 
     def _use_hc_convolution(self) -> bool:
         return bool(_cfg_get(self.config, "use_kernel", "use_hc_convolution", default=True)) and self.variant not in {
@@ -335,7 +374,6 @@ class EMALossModulator:
         return bool(_cfg_get(self.config, "use_clipping", default=True)) and self.variant != "no_clip"
 
     def _trend_conf_tau(self) -> float:
-        # Backward-compatible with the earlier dead_zone_tau argument.
         tau = _cfg_float(self.config, "trend_conf_tau", "dead_zone_tau", default=0.25)
         if self.variant in {"no_gate", "no_deadzone"}:
             return 0.0
@@ -343,8 +381,33 @@ class EMALossModulator:
             return 0.25
         return max(0.0, tau)
 
+    def _update_ema(self, loss_value: float) -> float:
+        loss_value = max(float(loss_value), 0.0)
+        if not self._use_ema():
+            self.ema_loss = loss_value
+            return loss_value
+
+        alpha = float(np.clip(_cfg_float(self.config, "alpha", default=0.95), 0.0, 0.999999))
+        if self.ema_loss is None:
+            self.ema_loss = loss_value
+        else:
+            self.ema_loss = alpha * self.ema_loss + (1.0 - alpha) * loss_value
+        return float(self.ema_loss)
+
+    def _observe_loss(self, loss_value: float) -> tuple[float, float]:
+        """Update EMA/control history and return ``(u_t, local_variance)``."""
+        ema_value = self._update_ema(loss_value)
+        self.last_ema = float(ema_value)
+        u = self.phi(ema_value)
+        if not math.isfinite(u):
+            raise ValueError(f"Control signal must be finite, got {u!r}.")
+        self.last_u = float(u)
+        self.u_hist.append(float(u))
+        var = self._update_signal_variance(float(u))
+        return float(u), float(var)
+
     def _update_signal_variance(self, u: float) -> float:
-        var_alpha = _cfg_float(self.config, "var_alpha", default=0.95)
+        var_alpha = float(np.clip(_cfg_float(self.config, "var_alpha", default=0.95), 0.0, 0.999999))
         if len(self.u_hist) < 2:
             residual_sq = 0.0
         else:
@@ -356,84 +419,123 @@ class EMALossModulator:
         self.last_loss_var = float(self.loss_signal_var)
         return float(self.loss_signal_var)
 
-    def _hc_conv_at(self, n: int) -> Optional[float]:
-        """Evaluate (kappa *_gamma u)(nh) with finite history.
-
-        Returns None if the delayed index still needs unavailable samples.  With
-        the enforced warm-up and D=M+1, this should not happen during active use.
-        """
-        if n < 0:
-            return None
-        acc = 0.0
-        last = len(self.u_hist) - 1
-        for m, kappa_m in self.hc_kernel.items():
-            idxs = (n - m - 1, n - m + 1, n + m + 1, n + m - 1)
-            if min(idxs) < 0 or max(idxs) > last:
-                return None
-            acc += kappa_m * sum(self.u_hist[j] for j in idxs)
-        return float(0.5 * self.h_step * acc)
+    def causal_index_range(self, t: int) -> tuple[int, int]:
+        """Return the exact signal-index range used at time t: [t-M, t]."""
+        t = int(t)
+        return t - self.m_win, t
 
     def max_index_used_by_delayed_hc(self, t: int) -> int:
-        """Largest signal index used by z_t; useful for causality tests."""
-        n = int(t) - self.hc_delay
-        return n + self.m_win + 1
+        """Backward-compatible alias; the corrected method has zero delay."""
+        return self.causal_index_range(t)[1]
 
     def min_index_used_by_delayed_hc(self, t: int) -> int:
-        """Smallest signal index used by z_t; useful for warm-up tests."""
-        n = int(t) - self.hc_delay
-        return n - self.m_win - 1
+        """Backward-compatible alias; returns t-M for the causal operator."""
+        return self.causal_index_range(t)[0]
 
-    def _hc_trend(self, t: int) -> Optional[float]:
-        z_now = self._hc_conv_at(t - self.hc_delay)
-        z_prev = self._hc_conv_at(t - 1 - self.hc_delay)
-        if z_now is None or z_prev is None:
+    def _direct_causal_feedback_at(self, n: int) -> Optional[float]:
+        """Evaluate the direct causal formula at an available history index."""
+        n = int(n)
+        if n < self.m_win or n >= len(self.u_hist):
             return None
-        self.last_hc_z = float(z_now)
-        self.last_ema = float(z_now)
-        q = float(z_prev - z_now)
+        u_now = self.u_hist[n]
+        acc = 0.0
+        for m, weight in self.causal_weights.items():
+            acc += weight * (self.u_hist[n - m] - u_now)
+        return float(0.5 * self.h_step * acc)
+
+    def _hc_conv_at(self, n: int) -> Optional[float]:
+        """Deprecated compatibility alias for the corrected causal feedback."""
+        return self._direct_causal_feedback_at(n)
+
+    @staticmethod
+    def _zero_extended(sequence: List[float], index: int) -> float:
+        return float(sequence[index]) if 0 <= index < len(sequence) else 0.0
+
+    def hartley_decomposition_feedback_at(self, n: int) -> Optional[float]:
+        """Evaluate the exact even/odd h-Hartley decomposition at index n.
+
+        This method is intended for verification/tests.  The runtime uses the
+        algebraically equivalent direct causal formula, which avoids evaluating
+        cancelling reflected/future terms.
+        """
+        n = int(n)
+        if n < self.m_win or n >= len(self.u_hist):
+            return None
+
+        q_even: Dict[int, float] = {}
+        q_odd: Dict[int, float] = {}
+        for k in range(-self.m_win, self.m_win + 1):
+            qk = self.causal_kernel.get(k, 0.0)
+            qmk = self.causal_kernel.get(-k, 0.0)
+            q_even[k] = 0.5 * (qk + qmk)
+            q_odd[k] = 0.5 * (qk - qmk)
+
+        def u(index: int) -> float:
+            return self._zero_extended(self.u_hist, index)
+
+        def reflected_u(index: int) -> float:
+            return u(-index)
+
+        even_term = 0.0
+        odd_term = 0.0
+        for m in range(-self.m_win, self.m_win + 1):
+            even_term += q_even[m] * (
+                u(n - m) + u(-n + m) + u(n + m) - u(-n - m)
+            )
+            odd_term += q_odd[m] * (
+                reflected_u(n - m)
+                + reflected_u(-n + m)
+                + reflected_u(n + m)
+                - reflected_u(-n - m)
+            )
+        return float(0.5 * self.h_step * (even_term + odd_term))
+
+    def _causal_hartley_feedback(self) -> Optional[float]:
+        feedback = self._direct_causal_feedback_at(len(self.u_hist) - 1)
+        if feedback is None:
+            return None
+        self.last_hc_z = float(feedback)
         if bool(_cfg_get(self.config, "relative_trend", default=False)):
             eps = _cfg_float(self.config, "eps_trend", default=1e-8)
-            q = q / (abs(z_prev) + eps)
-        return q
+            past_reference = 0.0
+            for m, weight in self.causal_weights.items():
+                past_reference += 0.5 * self.h_step * weight * self.u_hist[-1 - m]
+            feedback = feedback / (abs(past_reference) + eps)
+        return float(feedback)
+
+    def _hc_trend(self, t: Optional[int] = None) -> Optional[float]:
+        """Backward-compatible alias for the exact causal h-Hartley feedback."""
+        return self._causal_hartley_feedback()
 
     def _simple_causal_trend(self) -> Optional[float]:
+        """No-Hartley ablation: use only the most recent first difference."""
         if len(self.u_hist) < 2:
             return None
         q = self.u_hist[-2] - self.u_hist[-1]
         if bool(_cfg_get(self.config, "relative_trend", default=False)):
             eps = _cfg_float(self.config, "eps_trend", default=1e-8)
             q = q / (abs(self.u_hist[-2]) + eps)
-        self.last_hc_z = float(self.u_hist[-1])
-        self.last_ema = float(self.u_hist[-1])
         return float(q)
 
     def _beta_eff(self) -> float:
-        use_auto_beta = bool(_cfg_get(self.config, "use_auto_beta", default=True))
-        beta_fixed = _cfg_float(self.config, "beta_fixed", default=0.08)
-        beta_cap = _cfg_float(self.config, "beta_cap", default=3.0)
-        target_mean_abs_delta = _cfg_float(self.config, "target_mean_abs_delta", default=0.02)
+        use_auto_beta = bool(_cfg_get(self.config, "use_auto_beta", default=False))
+        beta_fixed = max(0.0, _cfg_float(self.config, "beta_fixed", default=0.01))
+        beta_cap = max(0.0, _cfg_float(self.config, "beta_cap", default=1.0))
+        target_mean_abs_delta = max(0.0, _cfg_float(self.config, "target_mean_abs_delta", default=0.01))
 
         if not use_auto_beta:
-            return beta_fixed
-
+            return float(min(beta_fixed, beta_cap) if beta_cap > 0.0 else beta_fixed)
         if self.raw_abs_ema is None or self.raw_abs_ema < 1e-8:
-            return float(min(beta_cap, max(beta_fixed, 0.08)))
-
+            return float(min(beta_fixed, beta_cap) if beta_cap > 0.0 else beta_fixed)
         beta = target_mean_abs_delta / (self.raw_abs_ema + 1e-12)
         return float(np.clip(beta, 0.0, beta_cap))
 
     def on_batch_end(self, loss_value: float) -> None:
-        loss_value = float(loss_value)
-        gamma = _cfg_float(self.config, "gamma", default=0.1)
+        gamma = float(np.clip(_cfg_float(self.config, "gamma", default=0.05), 0.0, 0.95))
+        _, var = self._observe_loss(float(loss_value))
 
-        u = self.phi(loss_value)
-        self.last_u = float(u)
-        self.u_hist.append(float(u))
-        var = self._update_signal_variance(u)
-
-        # Advance the base schedule first.  The modulation computed from loss_t is
-        # applied to r_{t+1}, so the next optimizer step uses eta_{t+1}.
-        self.last_base_lr = self.base.on_batch_end()
+        # Advance the base schedule first.  Feedback from L_t controls r_{t+1}.
+        self.last_base_lr = float(self.base.on_batch_end())
 
         raw_t = 0.0
         score_t = 0.0
@@ -444,7 +546,7 @@ class EMALossModulator:
         gate_active = False
 
         if self.batch_idx >= self.mod_warmup_steps:
-            trend = self._hc_trend(self.batch_idx) if self._use_hc_convolution() else self._simple_causal_trend()
+            trend = self._causal_hartley_feedback() if self._use_hc_convolution() else self._simple_causal_trend()
             if trend is not None:
                 raw_t = float(trend)
                 score_t = raw_t
@@ -463,24 +565,16 @@ class EMALossModulator:
                 gate_active = abs_score >= tau
                 if gate_active:
                     delta_t = beta_eff * score_t
-
                     if self._use_clipping():
-                        if delta_t > gamma:
-                            delta_t = gamma
-                            clipped = True
-                        elif delta_t < -gamma:
-                            delta_t = -gamma
-                            clipped = True
+                        clipped_delta = float(np.clip(delta_t, -gamma, gamma))
+                        clipped = not math.isclose(clipped_delta, delta_t, rel_tol=0.0, abs_tol=1e-15)
+                        delta_t = clipped_delta
                     else:
-                        # No-clipping ablation still keeps LR positive to avoid invalid optimizer state.
                         floor = _cfg_float(self.config, "emergency_delta_floor", default=-0.95)
                         ceil = _cfg_float(self.config, "emergency_delta_ceiling", default=5.0)
-                        if delta_t < floor:
-                            delta_t = floor
-                            emergency_clipped = True
-                        elif delta_t > ceil:
-                            delta_t = ceil
-                            emergency_clipped = True
+                        safe_delta = float(np.clip(delta_t, floor, ceil))
+                        emergency_clipped = not math.isclose(safe_delta, delta_t, rel_tol=0.0, abs_tol=1e-15)
+                        delta_t = safe_delta
 
                 self.total_mod_steps += 1
                 self.active_mod_steps += int(gate_active)
@@ -498,11 +592,10 @@ class EMALossModulator:
         self.last_gate_active = bool(gate_active)
         self.last_mod_lr = float(self.last_base_lr * (1.0 + delta_t))
         self._set_lr(self.last_mod_lr)
-
         self.batch_idx += 1
 
     def on_epoch_end(self, metric: Optional[float] = None) -> None:
-        self.last_base_lr = self.base.on_epoch_end(metric)
+        self.last_base_lr = float(self.base.on_epoch_end(metric))
         self.last_mod_lr = float(self.last_base_lr * (1.0 + self.last_delta))
         self._set_lr(self.last_mod_lr)
 
@@ -523,30 +616,30 @@ class EMALossModulator:
             "last_hc_z": float(self.last_hc_z),
             "last_score": float(self.last_score),
             "last_u": float(self.last_u),
+            "last_ema": float(self.last_ema),
             "last_loss_var": float(self.last_loss_var),
-            "hc_delay": float(self.hc_delay),
+            "hc_delay": 0.0,
             "hc_warmup_steps": float(self.mod_warmup_steps),
             "hc_kernel_l1": float(self.hc_kernel_l1),
+            "causal_kernel_norm": float(self.causal_kernel_norm),
+            "causal_window": float(self.m_win),
             "clip_count": float(self.clip_count),
             "emergency_clip_count": float(self.emergency_clip_count),
             "active_mod_steps": float(self.active_mod_steps),
             "total_mod_steps": float(self.total_mod_steps),
         }
-
-
 class HCGACModulator:
     """HC-convolutional trend with gradient-alignment confirmation.
 
-    This is the stronger online scheduler intended for paper experiments when the
-    pure HC loss-feedback modulator is too weak.  It keeps the adapted, delayed
-    Hartley--cosine convolution as the loss-trend estimator, but confirms the
-    sign and confidence of that trend with consecutive-gradient cosine alignment.
+    This optional stronger scheduler uses the corrected causal EMA--h-Hartley
+    loss-feedback signal and confirms its sign/confidence with consecutive-gradient
+    cosine alignment.
 
     Causal next-step rule:
         after backward at batch t: estimate a_t = cos(g_t, g_{t-1});
-        after observing L_t: compute delayed HC trend q_t from losses only up to t;
-        normalize and dead-zone q_t; confirm it by a_t; then apply
-        eta_{t+1} = r_{t+1}(1 + delta_t).
+        after observing L_t: update EMA and compute the zero-delay causal Hartley
+        signal from u_t,...,u_{t-M}; normalize and dead-zone it; confirm it by a_t;
+        then apply eta_{t+1} = r_{t+1}(1 + delta_t).
     """
 
     def __init__(
@@ -673,11 +766,8 @@ class HCGACModulator:
         return 0.0
 
     def on_batch_end(self, loss_value: float) -> None:
-        loss_value = float(loss_value)
-        u = self.hc.phi(loss_value)
-        self.hc.last_u = float(u)
-        self.hc.u_hist.append(float(u))
-        var = self.hc._update_signal_variance(u)
+        # Reuse the corrected EMA + bounded-map observation path.
+        _, var = self.hc._observe_loss(float(loss_value))
 
         self.last_base_lr = self.hc.base.on_batch_end()
 
@@ -689,7 +779,7 @@ class HCGACModulator:
         clipped = False
 
         if self.hc.batch_idx >= self.hc.mod_warmup_steps:
-            trend = self.hc._hc_trend(self.hc.batch_idx)
+            trend = self.hc._causal_hartley_feedback()
             if trend is not None:
                 raw_t = float(trend)
                 score_t = raw_t
@@ -713,11 +803,9 @@ class HCGACModulator:
                 if confirmed >= 0.0:
                     delta_t = envelope * gamma_up * math.tanh(beta_up * confirmed)
                     beta_eff = beta_up
-                    bound = gamma_up
                 else:
                     delta_t = envelope * gamma_down * math.tanh(beta_down * confirmed)
                     beta_eff = beta_down
-                    bound = gamma_down
 
                 unclipped = delta_t
                 delta_t = float(np.clip(delta_t, -gamma_down, gamma_up))
@@ -1323,7 +1411,7 @@ class Controller:
                 "ours_no_phi_cosine": "no_phi",
                 "ours_no_clip_cosine": "no_clip",
                 # Old aliases.
-                "ours_no_ema_cosine": "no_phi",
+                "ours_no_ema_cosine": "no_ema",
                 "ours_no_kernel_cosine": "no_hc",
                 "ours_deadzone_cosine": "deadzone",
             }.get(method, "full")

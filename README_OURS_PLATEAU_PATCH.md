@@ -1,35 +1,30 @@
-# Ours-Plateau patch
+# Ours-Plateau configuration
 
-This patch changes the paper-facing default proposal to `ours_plateau`, which is an alias for:
+`ours_plateau` remains an alias for the no-gate proposal on top of `ReduceLROnPlateau`.
 
-```text
-Ours-no-gate + Plateau = delayed HC micro-modulation on top of ReduceLROnPlateau with trend gate disabled.
-```
+The corrected proposal is now the causal EMA–\(h\)-Hartley signal
 
-## New method names
+\[
+s_t=\frac h2\sum_{m=1}^{M}w_m(u_{t-m}-u_t),
+\qquad
+\eta_{t+1}=r_{t+1}(1+\delta_t).
+\]
 
-- `ours_plateau`: recommended manuscript/default proposal name.
-- `ours_no_gate_plateau`: explicit implementation name; same behavior as `ours_plateau`.
-- `random_plateau`: random bounded perturbation on top of Plateau, for reviewer control.
+It uses no artificial delay. The effective minimum history is `M` steps.
 
-## Plateau-friendly defaults
-
-The global defaults are changed to conservative micro-modulation:
+Recommended conservative defaults:
 
 ```text
-m_win = 1
+alpha = 0.95
+m_win = 3
+rho = 0.8
 gamma = 0.05
 use_auto_beta = False
 beta_fixed = 0.01
-target_mean_abs_delta = 0.01
-beta_cap = 1.0
-random_delta_gamma = 0.05
-mod_warmup_steps = 0
+trend_conf_tau = 0.0
 ```
 
-The causality-safe HC warmup is still enforced internally. With `m_win=1`, the effective HC warmup is 5 steps.
-
-## Example run
+Example:
 
 ```bash
 python run_kaggle.py \
@@ -41,20 +36,10 @@ python run_kaggle.py \
   --batch-size 32 \
   --lr 0.001 \
   --seeds 0 1 2 \
-  --methods plateau random_plateau ours_plateau ours_no_gate_plateau \
+  --methods plateau random_plateau ours_no_hc_plateau ours_plateau \
   --mod-warmup-steps 0 \
-  --m-win 1 \
+  --m-win 3 \
   --gamma 0.05 \
   --no-auto-beta \
-  --beta-fixed 0.01 \
-  --no-eval-test-each-epoch
-```
-
-## Validation
-
-Validated with:
-
-```text
-python -m pytest -q
-39 passed, 1 warning
+  --beta-fixed 0.01
 ```

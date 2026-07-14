@@ -171,20 +171,19 @@ class ExperimentConfig:
     step_gamma: float = 0.1
 
 
-    # Paper-facing proposal: delayed HC micro-modulation on top of Plateau,
-    # with the trend-confidence gate disabled.  The explicit implementation name
-    # is `ours_no_gate_plateau`; `ours_plateau` is the cleaner manuscript alias.
+    # Paper-facing proposal: causal EMA--h-Hartley micro-modulation.
+    # `ours_plateau` remains the no-gate manuscript alias for compatibility.
 
-    # Delayed weighted h-Hartley--cosine loss-feedback hyperparameters.
-    # alpha is kept for backward-compatible hyperparameter sweeps, but the proposed
-    # method no longer uses EMA as its main filter.
+    # EMA and causal one-sided h-Hartley loss-feedback hyperparameters.
+    # The runtime signal is (h/2) sum_{m=1}^M w_m (u_{t-m}-u_t), with
+    # normalized exponential weights and next-step learning-rate application.
     alpha: float = 0.95
     c_phi: float = 1.0
-    m_win: int = 1
+    m_win: int = 3
     rho: float = 0.8
     gamma: float = 0.05
     hc_h: float = 1.0
-    hc_delay: int = 0  # 0 means use the adaptedness-safe default D=M+1
+    hc_delay: int = 0  # deprecated compatibility field; corrected causal method uses no delay
 
     # Noise-normalized trend-confidence controller options.
     bias_correct_ema: bool = True  # legacy field, retained for compatibility
@@ -199,7 +198,7 @@ class ExperimentConfig:
     # Ablation switches. These can also be activated through method names:
     # ours_no_hc_cosine, ours_no_noise_norm_cosine, ours_no_gate_cosine, ours_no_clip_cosine.
     use_phi: bool = True
-    use_ema: bool = True  # legacy field
+    use_ema: bool = True
     use_kernel: bool = True
     use_hc_convolution: bool = True
     use_clipping: bool = True

@@ -8,3 +8,5 @@ tqdm
 # Optional official optimizer baselines for paper-grade comparisons:
 # dadaptation
 # prodigyopt
+
+pytest
